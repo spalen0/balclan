@@ -52,7 +52,7 @@ make test
 
 To create your tokenized Strategy, you must override at least 3 functions outlined in `Strategy.sol`. An in-depth description for each function is provided above each function in `Strategy.sol`.
 
-It is important to remember the default behavior for any tokenized strategy is to be a permissionless vault, so functions such as _deployFunds and _freeFunds can be called by anyone, and care should be taken when implementing manipulatable logic such as swaps/LP movements. Strategists can choose to limit deposit/withdraws by overriding the `availableWithdrawLimit` and `availableDepositLimit` function if it is needed for safety.
+It is important to remember the default behaviour for any tokenized strategy is to be a permissionless vault, so functions such as _deployFunds and _freeFunds can be called by anyone, and care should be taken when implementing manipulatable logic such as swaps/LP movements. Strategists can choose to limit deposit/withdraws by overriding the `availableWithdrawLimit` and `availableDepositLimit` function if it is needed for safety.
 
 It is recommended to build strategies on the assumption that reports will happen based on the strategies specific `profitMaxUnlockTime`. Since this is the only time _harvestAndReport will be called any strategies that need more frequent checks or updates should override the _tend and tendTrigger functions for any needed mid-report maintenance.
 
