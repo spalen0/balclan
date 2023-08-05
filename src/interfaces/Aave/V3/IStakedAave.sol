@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0
-pragma solidity >=0.6.12;
+pragma solidity 0.8.18;
 
 interface IStakedAave {
     function stake(address to, uint256 amount) external;

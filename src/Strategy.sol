@@ -10,13 +10,11 @@ import {UniswapV3Swapper} from "@periphery/swappers/UniswapV3Swapper.sol";
 
 import {IAToken} from "./interfaces/Aave/V3/IAtoken.sol";
 import {IPool} from "./interfaces/Aave/V3/IPool.sol";
-import {IRewardsController} from "./interfaces/Aave/V3/IRewardsController.sol";
 
 contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     using SafeERC20 for ERC20;
 
-    IAToken public immutable aToken;
-
+    IAToken public immutable A_TOKEN;
     IPool internal constant AAVE_LENDING_POOL =
         IPool(0x794a61358D6845594F94dc1DB02A252b5b4814aD);
 
@@ -24,13 +22,13 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         address _asset,
         string memory _name
     ) BaseTokenizedStrategy(_asset, _name) {
-        // Set the aToken based on the asset we are using.
-        aToken = IAToken(
+        // Set the A_TOKEN based on the asset we are using.
+        A_TOKEN = IAToken(
             AAVE_LENDING_POOL.getReserveData(_asset).aTokenAddress
         );
 
         // Make sure its a real token.
-        require(address(aToken) != address(0), "!aToken");
+        require(address(A_TOKEN) != address(0), "!A_TOKEN");
 
         // Make approve the lending pool for cheaper deposits.
         ERC20(_asset).safeApprove(
@@ -117,11 +115,12 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        AAVE_LENDING_POOL.withdraw(
+        uint256 withdrawn = AAVE_LENDING_POOL.withdraw(
             asset,
-            Math.min(aToken.balanceOf(address(this)), _amount),
+            Math.min(A_TOKEN.balanceOf(address(this)), _amount),
             address(this)
         );
+        require(withdrawn >= _amount, "!freeFunds");
     }
 
     /**
@@ -163,14 +162,15 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         }
 
         _totalAssets =
-            aToken.balanceOf(address(this)) +
+            A_TOKEN.balanceOf(address(this)) +
             ERC20(asset).balanceOf(address(this));
     }
 
-    function _claimAndSellRewards() internal {
-        //claim all rewards
-        // _swapFrom(token, asset, balance, 0);
-    }
+    // @todo implement
+    // function _claimAndSellRewards() internal {
+    //claim all rewards
+    // _swapFrom(token, asset, balance, 0);
+    // }
 
     /*//////////////////////////////////////////////////////////////
                     OPTIONAL TO OVERRIDE BY STRATEGIST
@@ -235,7 +235,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     ) public view override returns (uint256) {
         return
             TokenizedStrategy.totalIdle() +
-            ERC20(asset).balanceOf(address(aToken));
+            ERC20(asset).balanceOf(address(A_TOKEN));
     }
 
     /**
@@ -261,9 +261,12 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
         uint256 aaveMax = Math.min(
-            ERC20(asset).balanceOf(address(aToken)),
-            aToken.balanceOf(address(this))
+            ERC20(asset).balanceOf(address(A_TOKEN)),
+            A_TOKEN.balanceOf(address(this))
         );
+
+        // withdraw as much as possible from aave
+        // slither-disable-next-line unused-return
         AAVE_LENDING_POOL.withdraw(
             asset,
             Math.min(_amount, aaveMax),
