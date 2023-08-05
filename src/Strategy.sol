@@ -3,32 +3,78 @@ pragma solidity 0.8.18;
 
 import {BaseTokenizedStrategy} from "@tokenized-strategy/BaseTokenizedStrategy.sol";
 
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {UniswapV3Swapper} from "@periphery/swappers/UniswapV3Swapper.sol";
 
-// Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {IAToken} from "./interfaces/Aave/V3/IAtoken.sol";
+import {IPool} from "./interfaces/Aave/V3/IPool.sol";
+import {IRewardsController} from "./interfaces/Aave/V3/IRewardsController.sol";
 
-/**
- * The `TokenizedStrategy` variable can be used to retrieve the strategies
- * specifc storage data your contract.
- *
- *       i.e. uint256 totalAssets = TokenizedStrategy.totalAssets()
- *
- * This can not be used for write functions. Any TokenizedStrategy
- * variables that need to be udpated post deployement will need to
- * come from an external call from the strategies specific `management`.
- */
-
-// NOTE: To implement permissioned functions you can use the onlyManagement and onlyKeepers modifiers
-
-contract Strategy is BaseTokenizedStrategy {
+contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     using SafeERC20 for ERC20;
+
+    IAToken public immutable aToken;
+
+    IPool internal constant AAVE_LENDING_POOL =
+        IPool(0x794a61358D6845594F94dc1DB02A252b5b4814aD);
 
     constructor(
         address _asset,
         string memory _name
-    ) BaseTokenizedStrategy(_asset, _name) {}
+    ) BaseTokenizedStrategy(_asset, _name) {
+        // Set the aToken based on the asset we are using.
+        aToken = IAToken(
+            AAVE_LENDING_POOL.getReserveData(_asset).aTokenAddress
+        );
+
+        // Make sure its a real token.
+        require(address(aToken) != address(0), "!aToken");
+
+        // Make approve the lending pool for cheaper deposits.
+        ERC20(_asset).safeApprove(
+            address(AAVE_LENDING_POOL),
+            type(uint256).max
+        );
+
+        minAmountToSell = 1e17; // COMP ~ $57
+        base = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619; // WETH
+        router = 0xE592427A0AEce92De3Edee1F18E0157C05861564; // UNI V3 Router
+    }
+
+    /**
+     * @notice Set the uni fees for swaps.
+     * @dev External function available to management to set
+     * the fees used in the `UniswapV3Swapper.
+     *
+     * Any incentived tokens will need a fee to be set for each
+     * reward token that it wishes to swap on reports.
+     *
+     * @param _token0 The first token of the pair.
+     * @param _token1 The second token of the pair.
+     * @param _fee The fee to be used for the pair.
+     */
+    function setUniFees(
+        address _token0,
+        address _token1,
+        uint24 _fee
+    ) external onlyManagement {
+        _setUniFees(_token0, _token1, _fee);
+    }
+
+    /**
+     * @notice Set the min amount to sell.
+     * @dev External function available to management to set
+     * the `minAmountToSell` variable in the `UniswapV3Swapper`.
+     *
+     * @param _minAmountToSell The min amount of tokens to sell.
+     */
+    function setMinAmountToSell(
+        uint256 _minAmountToSell
+    ) external onlyManagement {
+        minAmountToSell = _minAmountToSell;
+    }
 
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDEN BY STRATEGIST
@@ -46,9 +92,7 @@ contract Strategy is BaseTokenizedStrategy {
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
-        // TODO: implement deposit logice EX:
-        //
-        //      lendingpool.deposit(asset, _amount ,0);
+        AAVE_LENDING_POOL.supply(asset, _amount, address(this), 0);
     }
 
     /**
@@ -73,9 +117,11 @@ contract Strategy is BaseTokenizedStrategy {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        // TODO: implement withdraw logic EX:
-        //
-        //      lendingPool.withdraw(asset, _amount);
+        AAVE_LENDING_POOL.withdraw(
+            asset,
+            Math.min(aToken.balanceOf(address(this)), _amount),
+            address(this)
+        );
     }
 
     /**
@@ -105,11 +151,25 @@ contract Strategy is BaseTokenizedStrategy {
         override
         returns (uint256 _totalAssets)
     {
-        // TODO: Implement harvesting logic and accurate accounting EX:
-        //
-        //      _claminAndSellRewards();
-        //      _totalAssets = aToken.balanceof(address(this)) + ERC20(asset).balanceOf(address(this));
-        _totalAssets = ERC20(asset).balanceOf(address(this));
+        if (!TokenizedStrategy.isShutdown()) {
+            // Claim and sell any rewards to `asset`.
+            // _claimAndSellRewards();
+
+            // deposit any loose funds
+            uint256 looseAsset = ERC20(asset).balanceOf(address(this));
+            if (looseAsset > 0) {
+                AAVE_LENDING_POOL.supply(asset, looseAsset, address(this), 0);
+            }
+        }
+
+        _totalAssets =
+            aToken.balanceOf(address(this)) +
+            ERC20(asset).balanceOf(address(this));
+    }
+
+    function _claimAndSellRewards() internal {
+        //claim all rewards
+        // _swapFrom(token, asset, balance, 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -153,38 +213,6 @@ contract Strategy is BaseTokenizedStrategy {
     */
 
     /**
-     * @notice Gets the max amount of `asset` that an adress can deposit.
-     * @dev Defaults to an unlimited amount for any address. But can
-     * be overriden by strategists.
-     *
-     * This function will be called before any deposit or mints to enforce
-     * any limits desired by the strategist. This can be used for either a
-     * traditional deposit limit or for implementing a whitelist etc.
-     *
-     *   EX:
-     *      if(isAllowed[_owner]) return super.availableDepositLimit(_owner);
-     *
-     * This does not need to take into account any conversion rates
-     * from shares to assets. But should know that any non max uint256
-     * amounts may be converted to shares. So it is recommended to keep
-     * custom amounts low enough as not to cause overflow when multiplied
-     * by `totalSupply`.
-     *
-     * @param . The address that is depositing into the strategy.
-     * @return . The avialable amount the `_owner` can deposit in terms of `asset`
-     *
-    function availableDepositLimit(
-        address _owner
-    ) public view override returns (uint256) {
-        TODO: If desired Implement deposit limit logic and any needed state variables .
-        
-        EX:    
-            uint256 totalAssets = TokenizedStrategy.totalAssets();
-            return totalAssets >= depositLimit ? 0 : depositLimit - totalAssets;
-    }
-    */
-
-    /**
      * @notice Gets the max amount of `asset` that can be withdrawn.
      * @dev Defaults to an unlimited amount for any address. But can
      * be overriden by strategists.
@@ -201,16 +229,14 @@ contract Strategy is BaseTokenizedStrategy {
      *
      * @param . The address that is withdrawing from the strategy.
      * @return . The avialable amount that can be withdrawn in terms of `asset`
-     *
+     */
     function availableWithdrawLimit(
-        address _owner
+        address /*_owner*/
     ) public view override returns (uint256) {
-        TODO: If desired Implement withdraw limit logic and any needed state variables.
-        
-        EX:    
-            return TokenizedStrategy.totalIdle();
+        return
+            TokenizedStrategy.totalIdle() +
+            ERC20(asset).balanceOf(address(aToken));
     }
-    */
 
     /**
      * @dev Optional function for a strategist to override that will
@@ -232,14 +258,16 @@ contract Strategy is BaseTokenizedStrategy {
      *    }
      *
      * @param _amount The amount of asset to attempt to free.
-     *
+     */
     function _emergencyWithdraw(uint256 _amount) internal override {
-        TODO: If desired implement simple logic to free deployed funds.
-
-        EX:
-            _amount = min(_amount, atoken.balanceOf(address(this)));
-            lendingPool.withdraw(asset, _amount);
+        uint256 aaveMax = Math.min(
+            ERC20(asset).balanceOf(address(aToken)),
+            aToken.balanceOf(address(this))
+        );
+        AAVE_LENDING_POOL.withdraw(
+            asset,
+            Math.min(_amount, aaveMax),
+            address(this)
+        );
     }
-
-    */
 }
