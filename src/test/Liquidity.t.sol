@@ -14,7 +14,7 @@ contract LiquidityTest is Setup {
         mintAndDepositIntoStrategy(strategy, user, amount);
 
         // remove all liquidity from aave market
-        address market = strategy.A_TOKEN();
+        address market = strategy.aToken();
         vm.startPrank(market);
         asset.transfer(address(0xdEaD), asset.balanceOf(address(market)));
         assertEq(

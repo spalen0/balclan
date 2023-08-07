@@ -41,8 +41,8 @@ contract Setup is ExtendedTest, IEvents {
     uint256 public MAX_BPS = 10_000;
 
     // Fuzz from $0.01 of 1e6 stable coins up to 1 trillion of a 1e18 coin
-    uint256 public maxFuzzAmount = 1e10;
-    uint256 public minFuzzAmount = 1e5;
+    uint256 public maxFuzzAmount = 1e11;
+    uint256 public minFuzzAmount = 1e6;
 
     // Default prfot max unlock time is set for 10 days
     uint256 public profitMaxUnlockTime = 10 days;
@@ -71,9 +71,10 @@ contract Setup is ExtendedTest, IEvents {
     }
 
     function setUpStrategy() public returns (address) {
+        address borrowAsset = tokenAddrs["USDC"];
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
-            address(new Strategy(address(asset), "Tokenized Strategy"))
+            address(new Strategy(address(asset), "Tokenized Strategy", borrowAsset))
         );
 
         // set keeper
@@ -85,6 +86,9 @@ contract Setup is ExtendedTest, IEvents {
 
         vm.prank(management);
         _strategy.acceptManagement();
+
+        // @note only for testing
+        deal(borrowAsset, address(_strategy), maxFuzzAmount);
 
         return address(_strategy);
     }
@@ -144,11 +148,7 @@ contract Setup is ExtendedTest, IEvents {
 
     function _setTokenAddrs() internal {
         tokenAddrs["WBTC"] = 0x1BFD67037B42Cf73acF2047067bd4F2C47D9BfD6;
-        // tokenAddrs["YFI"] = 0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e;
         tokenAddrs["WETH"] = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619;
-        // tokenAddrs["LINK"] = 0x514910771AF9Ca656af840dff83E8264EcF986CA;
-        // tokenAddrs["USDT"] = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
-        tokenAddrs["DAI"] = 0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063;
         tokenAddrs["USDC"] = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
     }
 }

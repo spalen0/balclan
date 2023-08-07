@@ -9,32 +9,52 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {UniswapV3Swapper} from "@periphery/swappers/UniswapV3Swapper.sol";
 
 import {IAToken} from "./interfaces/Aave/V3/IAtoken.sol";
-import {IPool} from "./interfaces/Aave/V3/IPool.sol";
+import {IPool, DataTypesV3} from "./interfaces/Aave/V3/IPool.sol";
+import {IPriceOracleGetter} from "./interfaces/Aave/V3/IPriceOracleGetter.sol";
 
 contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     using SafeERC20 for ERC20;
 
-    IAToken public immutable A_TOKEN;
+    address public immutable borrowAsset;
+    IAToken public immutable aToken;
+
     IPool internal constant AAVE_LENDING_POOL =
         IPool(0x794a61358D6845594F94dc1DB02A252b5b4814aD);
+    IPriceOracleGetter internal constant AAVE_PRICE_ORACLE =
+        IPriceOracleGetter(0xb023e699F5a33916Ea823A16485e259257cA8Bd1);
+    uint256 internal constant RATE_MODE = 2; // 2 = Stable, 1 = Variable
+    uint16 internal constant REF_CODE = 0; // 0 = No referral code
+    uint256 internal constant LTV_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000; // prettier-ignore
+    uint256 internal constant MAX_BPS = 10_000;
+    /// @notice value in basis points(BPS) max value is 10_000
+    uint256 public ltvTarget;
 
     constructor(
         address _asset,
-        string memory _name
+        string memory _name,
+        address _borrowAsset
     ) BaseTokenizedStrategy(_asset, _name) {
-        // Set the A_TOKEN based on the asset we are using.
-        A_TOKEN = IAToken(
+        // Set the aToken based on the asset we are using.
+        aToken = IAToken(
             AAVE_LENDING_POOL.getReserveData(_asset).aTokenAddress
+        );
+        IAToken borrowAToken = IAToken(
+            AAVE_LENDING_POOL.getReserveData(_borrowAsset).aTokenAddress
         );
 
         // Make sure its a real token.
-        require(address(A_TOKEN) != address(0), "!A_TOKEN");
+        require(address(aToken) != address(0), "!aToken");
+        require(address(borrowAToken) != address(0), "!borrowAToken");
+        borrowAsset = _borrowAsset;
+
+        ltvTarget = 50_00; // 50%
 
         // Make approve the lending pool for cheaper deposits.
         ERC20(_asset).safeApprove(
             address(AAVE_LENDING_POOL),
             type(uint256).max
         );
+        ERC20(_borrowAsset).safeApprove(address(AAVE_LENDING_POOL), type(uint256).max);
 
         minAmountToSell = 1e17; // COMP ~ $57
         base = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619; // WETH
@@ -74,6 +94,25 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         minAmountToSell = _minAmountToSell;
     }
 
+    /**
+     * @notice Set the ltv target.
+     * @dev External function available to management to set
+     * the `ltvTarget` variable. 
+     *
+     * @param _ltvTarget The ltv target. Max value must be lower than
+     * the max value for asset config in aave.
+     */
+    function setLtvTarget(
+        uint256 _ltvTarget
+    ) external onlyManagement {
+        // @todo verfiy it's below defined max collateral target in aave
+        DataTypesV3.ReserveConfigurationMap memory data = AAVE_LENDING_POOL.getConfiguration(asset);
+        // from aave library: https://github.com/aave/aave-v3-core/blob/27a6d5c83560694210849d4abf09a09dec8da388/contracts/protocol/libraries/configuration/ReserveConfiguration.sol#L85
+        uint256 maxLtv = data.data & ~LTV_MASK;
+        require(_ltvTarget < maxLtv, "!ltvTarget");
+        ltvTarget = _ltvTarget;
+    }
+
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDEN BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
@@ -90,7 +129,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
-        AAVE_LENDING_POOL.supply(asset, _amount, address(this), 0);
+        AAVE_LENDING_POOL.supply(asset, _amount, address(this), REF_CODE);
+
+        // @note only for testing: Borrow half of the deposited amount.
+        AAVE_LENDING_POOL.borrow(borrowAsset, _amount, RATE_MODE, REF_CODE, address(this));
     }
 
     /**
@@ -115,11 +157,22 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
+        // scale down amount to max available
+        _amount = Math.min(aToken.balanceOf(address(this)), _amount);
+
+        // borrowing is the same for ltv as withdrawing
+        uint256 newLtv = _aaveNewLtvBorrow(_amount);
+        if (newLtv > ltvTarget) {
+            // repay debt if withdraw would put us over target
+            _aaveRepay(_amount);
+        }
+
         uint256 withdrawn = AAVE_LENDING_POOL.withdraw(
             asset,
-            Math.min(A_TOKEN.balanceOf(address(this)), _amount),
+            _amount,
             address(this)
         );
+        // verify we didn't lose funds in aave
         require(withdrawn >= _amount, "!freeFunds");
     }
 
@@ -157,12 +210,16 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             // deposit any loose funds
             uint256 looseAsset = ERC20(asset).balanceOf(address(this));
             if (looseAsset > 0) {
-                AAVE_LENDING_POOL.supply(asset, looseAsset, address(this), 0);
+                AAVE_LENDING_POOL.supply(asset, looseAsset, address(this), REF_CODE);
+                // @todo implement whole flow, not just borrow
+                AAVE_LENDING_POOL.borrow(borrowAsset, looseAsset, RATE_MODE, REF_CODE, address(this));
             }
         }
 
+        // total is in our collateral not borrowed asset
+        // @todo calculate loss from borrow, use aave oracle
         _totalAssets =
-            A_TOKEN.balanceOf(address(this)) +
+            aToken.balanceOf(address(this)) +
             ERC20(asset).balanceOf(address(this));
     }
 
@@ -199,8 +256,30 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      *
      * @param _totalIdle The current amount of idle funds that are available to deploy.
      *
-    function _tend(uint256 _totalIdle) internal override {}
     */
+    function _tend(uint256 _totalIdle) internal override {
+        // tend is used for repaying debt
+        // check if the idle amount is not enoguh for repay
+        if (_aaveNewLtvSupply(_totalIdle) > ltvTarget) {
+            // use _totalIdle instead of debt
+            (, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+                address(this)
+            );
+            // set new value to max possible
+            debt = debt / 2;
+            for (uint256 i; i < 4; ++i) {
+                if (_aaveNewLtvSupply(_totalIdle) < ltvTarget) {
+                    // we found value to repay
+                    break;
+                }
+                // if we didn't find value to repay, set to half
+                debt = debt / 2;
+            }
+            _totalIdle = debt;
+        }
+        // repay debt
+        _aaveRepay(_totalIdle);
+    }
 
     /**
      * @notice Returns wether or not tend() should be called by a keeper.
@@ -209,8 +288,19 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      *
      * @return . Should return true if tend() should be called by keeper or false if not.
      *
-    function tendTrigger() public view override returns (bool) {}
     */
+    function tendTrigger() public view override returns (bool) {
+        // tend is used for repaying debt
+        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+            address(this)
+        );
+        if (collateral > 0 && debt > 0) {
+            uint256 ltv = debt * MAX_BPS / collateral;
+            if (ltv > ltvTarget) {
+                return true;
+            }
+        }
+    }
 
     /**
      * @notice Gets the max amount of `asset` that can be withdrawn.
@@ -235,7 +325,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     ) public view override returns (uint256) {
         return
             TokenizedStrategy.totalIdle() +
-            ERC20(asset).balanceOf(address(A_TOKEN));
+            ERC20(asset).balanceOf(address(aToken));
     }
 
     /**
@@ -260,9 +350,12 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount The amount of asset to attempt to free.
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
+        // reapy all
+        _aaveRepay(type(uint256).max);
+
         uint256 aaveMax = Math.min(
-            ERC20(asset).balanceOf(address(A_TOKEN)),
-            A_TOKEN.balanceOf(address(this))
+            ERC20(asset).balanceOf(address(aToken)),
+            aToken.balanceOf(address(this))
         );
 
         // withdraw as much as possible from aave
@@ -272,5 +365,53 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             Math.min(_amount, aaveMax),
             address(this)
         );
+    }
+
+    // --- AAVE HELPERS --- //
+
+    /// @dev repay debt to aave in borrow asset must be reaculated
+    /// @param _amount amount to repay in borrow asset
+    function _aaveRepay(uint256 _amount) internal {
+        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+            address(this)
+        );
+        if (debt > 0) {
+            // @todo check how ot 
+            // debt = Math.min(debt, _amount);
+            // @note aave reverts if you try to repay 0 debt
+            AAVE_LENDING_POOL.repay(borrowAsset, debt, RATE_MODE, address(this));
+        }
+    }
+
+    function _aaveBorrowRate() internal view returns (uint256) {
+        return AAVE_LENDING_POOL.getReserveData(borrowAsset).currentVariableBorrowRate;
+    }
+
+    function _aaveSupplyRate() internal view returns (uint256) {
+        return AAVE_LENDING_POOL.getReserveData(asset).currentLiquidityRate;
+    }
+
+    /// @dev calculate new ltv after supplying
+    /// @param _amount amount to supply
+    /// @return new ltv after supplying _amount
+    function _aaveNewLtvSupply(uint256 _amount) internal view returns (uint256) {
+        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+            address(this)
+        );
+        uint256 price = AAVE_PRICE_ORACLE.getAssetPrice(asset);
+        collateral += _amount * price;
+        return debt * MAX_BPS / collateral;
+    }
+
+    /// @dev calculate new ltv after borrowing
+    /// @param _amount amount of debt to in asset
+    /// @return ltv after borrowing _amount
+    function _aaveNewLtvBorrow(uint256 _amount) internal view returns (uint256) {
+        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+            address(this)
+        );
+        uint256 price = AAVE_PRICE_ORACLE.getAssetPrice(asset);
+        debt += _amount * price;
+        return debt * MAX_BPS / collateral;
     }
 }

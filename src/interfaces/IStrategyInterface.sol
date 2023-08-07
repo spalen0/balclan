@@ -5,7 +5,7 @@ import {IStrategy} from "@tokenized-strategy/interfaces/IStrategy.sol";
 import {IUniswapV3Swapper} from "@periphery/swappers/interfaces/IUniswapV3Swapper.sol";
 
 interface IStrategyInterface is IStrategy, IUniswapV3Swapper {
-    function A_TOKEN() external view returns (address);
+    function aToken() external view returns (address);
 
     function claimRewards() external view returns (bool);
 
