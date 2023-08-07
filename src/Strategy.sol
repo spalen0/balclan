@@ -245,11 +245,33 @@ contract Strategy is BaseTokenizedStrategy {
 
     */
 
-    function supplyToCompound(
-        uint256 amount
-    ) public returns (uint256 supplied) {
+    function _supplyToCompound(uint256 amount) internal {
         if (!comet.isSupplyPaused()) {
             comet.supply(asset, amount);
         }
     }
+
+    function _getCompoundSupplyAPY(
+        uint256 amountWeAdd
+    ) internal returns (uint256 apy) {}
+
+    function _getCompoundBorrowAPY(
+        uint256 amountWeAdd
+    ) internal returns (uint256 apy) {}
+
+    function _getCompoundSupplyRewardsAPY(
+        uint256 amountWeAdd
+    ) internal returns (uint256 apy) {}
+
+    function _getCompoundBorrowRewardsAPY(
+        uint256 amountWeAdd
+    ) internal returns (uint256 apy) {}
+
+    function _getAAVEBorrowAPY(
+        uint256 amountWeAdd
+    ) internal returns (uint256 apy) {}
+
+    function _getAAVESupplyAPY(
+        uint256 amountWeAdd
+    ) internal returns (uint256 apy) {}
 }
