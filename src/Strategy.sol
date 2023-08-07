@@ -7,7 +7,7 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Import interfaces for many popular DeFi projects, or add your own!
-//import "../interfaces/<protocol>/<Interface>.sol";
+import {IComet} from "./interfaces/IComet.sol";
 
 /**
  * The `TokenizedStrategy` variable can be used to retrieve the strategies
@@ -24,6 +24,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 contract Strategy is BaseTokenizedStrategy {
     using SafeERC20 for ERC20;
+
+    IComet public comet;
 
     constructor(
         address _asset,
@@ -242,4 +244,12 @@ contract Strategy is BaseTokenizedStrategy {
     }
 
     */
+
+    function supplyToCompound(
+        uint256 amount
+    ) public returns (uint256 supplied) {
+        if (!comet.isSupplyPaused()) {
+            comet.supply(asset, amount);
+        }
+    }
 }
