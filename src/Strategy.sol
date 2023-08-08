@@ -13,6 +13,7 @@ import {IPoolAddressesProvider} from "./interfaces/Aave/V3/IPoolAddressesProvide
 import {IPool, DataTypesV3} from "./interfaces/Aave/V3/IPool.sol";
 import {IPriceOracleGetter} from "./interfaces/Aave/V3/IPriceOracleGetter.sol";
 import {IReserveInterestRateStrategy} from "./interfaces/Aave/V3/IReserveInterestRateStrategy.sol";
+import {IProtocolDataProvider} from "./interfaces/Aave/V3/IProtocolDataProvider.sol";
 
 // import "forge-std/console.sol";
 
@@ -23,6 +24,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     IAToken public immutable aToken;
     IPool public immutable aaveLendingPool;
     IPriceOracleGetter public immutable aavePriceOracle;
+    IProtocolDataProvider public immutable aaveProtocolDataProvider;
+    IReserveInterestRateStrategy public immutable supplyInterestRate;
     IReserveInterestRateStrategy public immutable borrowInterestRate;
 
     uint256 internal constant AAVE_PRICE_ORACLE_BASE = 1e8;
@@ -47,9 +50,11 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         require(address(aavePriceOracle) != address(0), "!aavePriceOracle");
 
         // Set the aToken based on the asset we are using.
-        aToken = IAToken(
-            aaveLendingPool.getReserveData(_asset).aTokenAddress
-        );
+        DataTypesV3.ReserveData memory supplyConfig =
+            aaveLendingPool.getReserveData(_asset);
+        aToken = IAToken(supplyConfig.aTokenAddress);
+        supplyInterestRate = IReserveInterestRateStrategy(supplyConfig.interestRateStrategyAddress);
+
         DataTypesV3.ReserveData memory borrowConfig =
             aaveLendingPool.getReserveData(_borrowAsset);
         IAToken borrowAToken = IAToken(
@@ -60,6 +65,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         require(address(aToken) != address(0), "!aToken");
         require(address(borrowAToken) != address(0), "!borrowAToken");
         require(address(borrowInterestRate) != address(0), "!borrowInterestRate");
+
+        aaveProtocolDataProvider = IProtocolDataProvider(aavePoolDataProvider.getPoolDataProvider());
+        require(address(aaveProtocolDataProvider.ADDRESSES_PROVIDER()) == _aavePoolDataProvider, "!_aavePoolDataProvider");
 
         borrowAsset = _borrowAsset;
         ltvTarget = 50_00; // 50%
@@ -409,8 +417,33 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         return aaveLendingPool.getReserveData(borrowAsset).currentVariableBorrowRate;
     }
 
-    function _aaveSupplyRate() internal view returns (uint256) {
-        return aaveLendingPool.getReserveData(asset).currentLiquidityRate;
+    function _aaveSupplyRate(uint256 _amount) internal view returns (uint256) {
+        // return aaveLendingPool.getReserveData(asset).currentLiquidityRate;
+
+        (uint256 unbacked, , , uint256 totalStableDebt, uint256 totalVariableDebt, , , , uint256 averageStableBorrowRate, , , ) =
+            aaveProtocolDataProvider.getReserveData(asset);
+
+        uint256 availableLiquidity = ERC20(asset).balanceOf(address(aToken));
+
+        uint256 newLiquidity = availableLiquidity + _amount;
+
+        uint256 totalLiquidity = newLiquidity + unbacked + totalStableDebt + totalVariableDebt;
+
+        (, , , , uint256 reserveFactor, , , , , ) = aaveProtocolDataProvider.getReserveConfigurationData(asset);
+
+        DataTypesV3.CalculateInterestRatesParams memory params = DataTypesV3.CalculateInterestRatesParams(
+            unbacked,
+            _amount,
+            0,
+            totalStableDebt,
+            totalVariableDebt,
+            averageStableBorrowRate,
+            reserveFactor,
+            asset,
+            address(aToken)
+        );
+        (uint256 newLiquidityRate, , ) = supplyInterestRate.calculateInterestRates(params);
+        return newLiquidityRate / 1e9; // divided by 1e9 to go from Ray to Wad
     }
 
     /// @dev calculate new ltv after supplying
