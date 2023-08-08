@@ -147,8 +147,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         aaveLendingPool.supply(asset, _amount, address(this), REF_CODE);
 
         // define amount to borrow
+        _amount = _amount * ltvTarget / MAX_BPS;
         if (_aaveNewLtvBorrow(_amount) < ltvTarget) {
-            _amount = _amount * ltvTarget / MAX_BPS;
             _amount = _convertAssetToBorrow(_amount);
             aaveLendingPool.borrow(borrowAsset, _amount, RATE_MODE, REF_CODE, address(this));
         }
@@ -230,9 +230,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             uint256 looseAsset = ERC20(asset).balanceOf(address(this));
             if (looseAsset > 0) {
                 aaveLendingPool.supply(asset, looseAsset, address(this), REF_CODE);
+                looseAsset = looseAsset * ltvTarget / MAX_BPS;
                 if (_aaveNewLtvBorrow(looseAsset) < ltvTarget) {
                     // convert loose asset to borrow asset
-                    looseAsset = looseAsset * ltvTarget / MAX_BPS;
                     looseAsset = _convertAssetToBorrow(looseAsset);
                     aaveLendingPool.borrow(borrowAsset, looseAsset, RATE_MODE, REF_CODE, address(this));
                 }
@@ -432,6 +432,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
         );
+        // cannot borrow without collateral
+        if (collateral == 0) {
+            return MAX_BPS;
+        }
         uint256 price = aavePriceOracle.getAssetPrice(asset);
         debt += _amount * price;
         return debt * MAX_BPS / collateral;
