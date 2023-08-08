@@ -8,8 +8,6 @@ import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {UniswapV3Swapper} from "@periphery/swappers/UniswapV3Swapper.sol";
 
-import {IComet} from "./interfaces/IComet.sol";
-
 import {IAToken} from "./interfaces/Aave/V3/IAtoken.sol";
 import {IPoolAddressesProvider} from "./interfaces/Aave/V3/IPoolAddressesProvider.sol";
 import {IPool, DataTypesV3} from "./interfaces/Aave/V3/IPool.sol";
@@ -20,8 +18,6 @@ import {IReserveInterestRateStrategy} from "./interfaces/Aave/V3/IReserveInteres
 
 contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     using SafeERC20 for ERC20;
-
-    IComet public comet;
 
     address public immutable borrowAsset;
     IAToken public immutable aToken;
@@ -391,36 +387,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             address(this)
         );
     }
-
-    function _supplyToCompound(uint256 amount) internal {
-        if (!comet.isSupplyPaused()) {
-            comet.supply(asset, amount);
-        }
-    }
-
-    function _getCompoundSupplyAPY(
-        uint256 amountWeAdd
-    ) internal returns (uint256 apy) {}
-
-    function _getCompoundBorrowAPY(
-        uint256 amountWeAdd
-    ) internal returns (uint256 apy) {}
-
-    function _getCompoundSupplyRewardsAPY(
-        uint256 amountWeAdd
-    ) internal returns (uint256 apy) {}
-
-    function _getCompoundBorrowRewardsAPY(
-        uint256 amountWeAdd
-    ) internal returns (uint256 apy) {}
-
-    function _getAAVEBorrowAPY(
-        uint256 amountWeAdd
-    ) internal returns (uint256 apy) {}
-
-    function _getAAVESupplyAPY(
-        uint256 amountWeAdd
-    ) internal returns (uint256 apy) {}
 
     // --- AAVE HELPERS --- //
 
