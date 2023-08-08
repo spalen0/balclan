@@ -71,10 +71,11 @@ contract Setup is ExtendedTest, IEvents {
     }
 
     function setUpStrategy() public returns (address) {
+        address aavePoolAddressProvider = 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb;
         address borrowAsset = tokenAddrs["USDC"];
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
-            address(new Strategy(address(asset), "Tokenized Strategy", borrowAsset))
+            address(new Strategy(address(asset), "Tokenized Strategy", borrowAsset, aavePoolAddressProvider))
         );
 
         // set keeper
@@ -87,8 +88,8 @@ contract Setup is ExtendedTest, IEvents {
         vm.prank(management);
         _strategy.acceptManagement();
 
-        // @note only for testing
-        deal(borrowAsset, address(_strategy), maxFuzzAmount);
+        // @note only for testing without compound supply
+        deal(borrowAsset, address(_strategy), 1e6);
 
         return address(_strategy);
     }

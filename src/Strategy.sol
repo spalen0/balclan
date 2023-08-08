@@ -9,19 +9,23 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {UniswapV3Swapper} from "@periphery/swappers/UniswapV3Swapper.sol";
 
 import {IAToken} from "./interfaces/Aave/V3/IAtoken.sol";
+import {IPoolAddressesProvider} from "./interfaces/Aave/V3/IPoolAddressesProvider.sol";
 import {IPool, DataTypesV3} from "./interfaces/Aave/V3/IPool.sol";
 import {IPriceOracleGetter} from "./interfaces/Aave/V3/IPriceOracleGetter.sol";
+import {IReserveInterestRateStrategy} from "./interfaces/Aave/V3/IReserveInterestRateStrategy.sol";
+
+// import "forge-std/console.sol";
 
 contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     using SafeERC20 for ERC20;
 
     address public immutable borrowAsset;
     IAToken public immutable aToken;
+    IPool public immutable aaveLendingPool;
+    IPriceOracleGetter public immutable aavePriceOracle;
+    IReserveInterestRateStrategy public immutable borrowInterestRate;
 
-    IPool internal constant AAVE_LENDING_POOL =
-        IPool(0x794a61358D6845594F94dc1DB02A252b5b4814aD);
-    IPriceOracleGetter internal constant AAVE_PRICE_ORACLE =
-        IPriceOracleGetter(0xb023e699F5a33916Ea823A16485e259257cA8Bd1);
+    uint256 internal constant AAVE_PRICE_ORACLE_BASE = 1e8;
     uint256 internal constant RATE_MODE = 2; // 2 = Stable, 1 = Variable
     uint16 internal constant REF_CODE = 0; // 0 = No referral code
     uint256 internal constant LTV_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000; // prettier-ignore
@@ -32,29 +36,40 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     constructor(
         address _asset,
         string memory _name,
-        address _borrowAsset
+        address _borrowAsset,
+        address _aavePoolDataProvider
     ) BaseTokenizedStrategy(_asset, _name) {
+        IPoolAddressesProvider aavePoolDataProvider =
+            IPoolAddressesProvider(_aavePoolDataProvider);
+        aaveLendingPool = IPool(aavePoolDataProvider.getPool());
+        require(address(aaveLendingPool) != address(0), "!aaveLendingPool");
+        aavePriceOracle = IPriceOracleGetter(aavePoolDataProvider.getPriceOracle());
+        require(address(aavePriceOracle) != address(0), "!aavePriceOracle");
+
         // Set the aToken based on the asset we are using.
         aToken = IAToken(
-            AAVE_LENDING_POOL.getReserveData(_asset).aTokenAddress
+            aaveLendingPool.getReserveData(_asset).aTokenAddress
         );
+        DataTypesV3.ReserveData memory borrowConfig =
+            aaveLendingPool.getReserveData(_borrowAsset);
         IAToken borrowAToken = IAToken(
-            AAVE_LENDING_POOL.getReserveData(_borrowAsset).aTokenAddress
+            borrowConfig.aTokenAddress
         );
+        borrowInterestRate = IReserveInterestRateStrategy(borrowConfig.interestRateStrategyAddress);
 
-        // Make sure its a real token.
         require(address(aToken) != address(0), "!aToken");
         require(address(borrowAToken) != address(0), "!borrowAToken");
-        borrowAsset = _borrowAsset;
+        require(address(borrowInterestRate) != address(0), "!borrowInterestRate");
 
+        borrowAsset = _borrowAsset;
         ltvTarget = 50_00; // 50%
 
         // Make approve the lending pool for cheaper deposits.
         ERC20(_asset).safeApprove(
-            address(AAVE_LENDING_POOL),
+            address(aaveLendingPool),
             type(uint256).max
         );
-        ERC20(_borrowAsset).safeApprove(address(AAVE_LENDING_POOL), type(uint256).max);
+        ERC20(_borrowAsset).safeApprove(address(aaveLendingPool), type(uint256).max);
 
         minAmountToSell = 1e17; // COMP ~ $57
         base = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619; // WETH
@@ -106,7 +121,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 _ltvTarget
     ) external onlyManagement {
         // @todo verfiy it's below defined max collateral target in aave
-        DataTypesV3.ReserveConfigurationMap memory data = AAVE_LENDING_POOL.getConfiguration(asset);
+        DataTypesV3.ReserveConfigurationMap memory data = aaveLendingPool.getConfiguration(asset);
         // from aave library: https://github.com/aave/aave-v3-core/blob/27a6d5c83560694210849d4abf09a09dec8da388/contracts/protocol/libraries/configuration/ReserveConfiguration.sol#L85
         uint256 maxLtv = data.data & ~LTV_MASK;
         require(_ltvTarget < maxLtv, "!ltvTarget");
@@ -129,10 +144,14 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * to deposit in the yield source.
      */
     function _deployFunds(uint256 _amount) internal override {
-        AAVE_LENDING_POOL.supply(asset, _amount, address(this), REF_CODE);
+        aaveLendingPool.supply(asset, _amount, address(this), REF_CODE);
 
-        // @note only for testing: Borrow half of the deposited amount.
-        AAVE_LENDING_POOL.borrow(borrowAsset, _amount, RATE_MODE, REF_CODE, address(this));
+        // define amount to borrow
+        if (_aaveNewLtvBorrow(_amount) < ltvTarget) {
+            _amount = _amount * ltvTarget / MAX_BPS;
+            _amount = _convertAssetToBorrow(_amount);
+            aaveLendingPool.borrow(borrowAsset, _amount, RATE_MODE, REF_CODE, address(this));
+        }
     }
 
     /**
@@ -167,7 +186,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             _aaveRepay(_amount);
         }
 
-        uint256 withdrawn = AAVE_LENDING_POOL.withdraw(
+        uint256 withdrawn = aaveLendingPool.withdraw(
             asset,
             _amount,
             address(this)
@@ -210,17 +229,19 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             // deposit any loose funds
             uint256 looseAsset = ERC20(asset).balanceOf(address(this));
             if (looseAsset > 0) {
-                AAVE_LENDING_POOL.supply(asset, looseAsset, address(this), REF_CODE);
-                // @todo implement whole flow, not just borrow
-                AAVE_LENDING_POOL.borrow(borrowAsset, looseAsset, RATE_MODE, REF_CODE, address(this));
+                aaveLendingPool.supply(asset, looseAsset, address(this), REF_CODE);
+                if (_aaveNewLtvBorrow(looseAsset) < ltvTarget) {
+                    // convert loose asset to borrow asset
+                    looseAsset = looseAsset * ltvTarget / MAX_BPS;
+                    looseAsset = _convertAssetToBorrow(looseAsset);
+                    aaveLendingPool.borrow(borrowAsset, looseAsset, RATE_MODE, REF_CODE, address(this));
+                }
             }
         }
 
         // total is in our collateral not borrowed asset
-        // @todo calculate loss from borrow, use aave oracle
-        _totalAssets =
-            aToken.balanceOf(address(this)) +
-            ERC20(asset).balanceOf(address(this));
+        // _totalAssets = aToken.balanceOf(address(this));
+        _totalAssets = _aaveFunds() + ERC20(borrowAsset).balanceOf(address(this));
     }
 
     // @todo implement
@@ -262,7 +283,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         // check if the idle amount is not enoguh for repay
         if (_aaveNewLtvSupply(_totalIdle) > ltvTarget) {
             // use _totalIdle instead of debt
-            (, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+            (, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
                 address(this)
             );
             // set new value to max possible
@@ -291,7 +312,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     */
     function tendTrigger() public view override returns (bool) {
         // tend is used for repaying debt
-        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+        (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
         );
         if (collateral > 0 && debt > 0) {
@@ -360,7 +381,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
         // withdraw as much as possible from aave
         // slither-disable-next-line unused-return
-        AAVE_LENDING_POOL.withdraw(
+        aaveLendingPool.withdraw(
             asset,
             Math.min(_amount, aaveMax),
             address(this)
@@ -372,33 +393,34 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @dev repay debt to aave in borrow asset must be reaculated
     /// @param _amount amount to repay in borrow asset
     function _aaveRepay(uint256 _amount) internal {
-        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+        (, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
         );
+        // aave reverts if you try to repay 0 debt
         if (debt > 0) {
-            // @todo check how ot 
-            // debt = Math.min(debt, _amount);
-            // @note aave reverts if you try to repay 0 debt
-            AAVE_LENDING_POOL.repay(borrowAsset, debt, RATE_MODE, address(this));
+            _amount = _convertAssetToBorrow(_amount);
+            // @todo IMPORTANT: fix the problem with paying for borrowing rate
+            aaveLendingPool.repay(borrowAsset, _amount, RATE_MODE, address(this));
         }
     }
 
     function _aaveBorrowRate() internal view returns (uint256) {
-        return AAVE_LENDING_POOL.getReserveData(borrowAsset).currentVariableBorrowRate;
+        // @todo implement apy calculation for supplied amount
+        return aaveLendingPool.getReserveData(borrowAsset).currentVariableBorrowRate;
     }
 
     function _aaveSupplyRate() internal view returns (uint256) {
-        return AAVE_LENDING_POOL.getReserveData(asset).currentLiquidityRate;
+        return aaveLendingPool.getReserveData(asset).currentLiquidityRate;
     }
 
     /// @dev calculate new ltv after supplying
     /// @param _amount amount to supply
     /// @return new ltv after supplying _amount
     function _aaveNewLtvSupply(uint256 _amount) internal view returns (uint256) {
-        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+        (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
         );
-        uint256 price = AAVE_PRICE_ORACLE.getAssetPrice(asset);
+        uint256 price = aavePriceOracle.getAssetPrice(asset);
         collateral += _amount * price;
         return debt * MAX_BPS / collateral;
     }
@@ -407,11 +429,47 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @param _amount amount of debt to in asset
     /// @return ltv after borrowing _amount
     function _aaveNewLtvBorrow(uint256 _amount) internal view returns (uint256) {
-        (uint256 collateral, uint256 debt, , , , ) = AAVE_LENDING_POOL.getUserAccountData(
+        (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
         );
-        uint256 price = AAVE_PRICE_ORACLE.getAssetPrice(asset);
+        uint256 price = aavePriceOracle.getAssetPrice(asset);
         debt += _amount * price;
         return debt * MAX_BPS / collateral;
+    }
+
+    function _convertBorrowToAsset(uint256 _amount) internal view returns (uint256) {
+        uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
+        uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
+        // @todo defined flow for 0, maybe revert?
+        // wbtc = 8 decimasl / usdc = 6 decimals -> * 1e2 to get the same amount
+        return _amount * borrowPrice  * 10 ** 2 / assetPrice;
+    }
+
+    function _convertAssetToBorrow(uint256 _amount) internal view returns (uint256) {
+        uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
+        uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
+        // @todo extract decimals for borrow asset, 
+        // wbtc = 8 decimasl / usdc = 6 decimals -> / 1e2 to get the same amount
+        return _amount * assetPrice / borrowPrice / 10 ** 2;
+    }
+
+    /// @dev Get current possition in aave, collateral - debt in asset value
+    /// @return funds in asset value
+    function _aaveFunds() internal view returns (uint256) {
+        (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
+            address(this)
+        );
+        uint256 price = aavePriceOracle.getAssetPrice(asset);
+        
+        // console.log("asset: ", aToken.balanceOf(address(this)));
+        // uint256 value = collateral - debt;
+        // console.log("value: ", value);
+        // console.log("price: ", price);
+        // uint256 endValue = value * 10 ** TokenizedStrategy.decimals() / price;
+        // console.log("endValue: ", endValue);
+        // // @todo check if need asset decimals here
+        // return endValue;
+
+        return (collateral - debt) * 10 ** TokenizedStrategy.decimals() / price;
     }
 }
