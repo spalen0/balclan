@@ -75,7 +75,14 @@ contract Setup is ExtendedTest, IEvents {
         address borrowAsset = tokenAddrs["USDC"];
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
-            address(new Strategy(address(asset), "Tokenized Strategy", borrowAsset, aavePoolAddressProvider))
+            address(
+                new Strategy(
+                    address(asset),
+                    "Tokenized Strategy",
+                    borrowAsset,
+                    aavePoolAddressProvider
+                )
+            )
         );
 
         // set keeper
