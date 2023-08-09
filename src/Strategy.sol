@@ -268,7 +268,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
                 );
                 looseAsset = (looseAsset * ltvTarget) / MAX_BPS;
                 if (_aaveNewLtvBorrow(looseAsset) < ltvTarget) {
-                    // convert loose asset to borrow asset
                     _flowAaveBorrowCompSupply(looseAsset);
                 }
             }
@@ -449,8 +448,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     }
 
     function _aaveSupplyRate(int256 _amount) internal view returns (uint256) {
-        // return aaveLendingPool.getReserveData(asset).currentLiquidityRate;
-
         (
             uint256 unbacked,
             ,
@@ -524,42 +521,12 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         return (debt * MAX_BPS) / collateral;
     }
 
-    function _convertBorrowToAsset(
-        uint256 _amount
-    ) internal view returns (uint256) {
-        uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
-        uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
-        // @todo defined flow for 0, maybe revert?
-        // wbtc = 8 decimasl / usdc = 6 decimals -> * 1e2 to get the same amount
-        return (_amount * borrowPrice * 10 ** 2) / assetPrice;
-    }
-
-    function _convertAssetToBorrow(
-        uint256 _amount
-    ) internal view returns (uint256) {
-        uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
-        uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
-        // @todo extract decimals for borrow asset,
-        // wbtc = 8 decimasl / usdc = 6 decimals -> / 1e2 to get the same amount
-        return (_amount * assetPrice) / borrowPrice / 10 ** 2;
-    }
-
     /// @dev Get current possition in aave, collateral - debt in asset value
     /// @return funds in asset value
     function _aaveFunds() internal view returns (uint256) {
         (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool
             .getUserAccountData(address(this));
         uint256 price = aavePriceOracle.getAssetPrice(asset);
-
-        // console.log("asset: ", aToken.balanceOf(address(this)));
-        // uint256 value = collateral - debt;
-        // console.log("value: ", value);
-        // console.log("price: ", price);
-        // uint256 endValue = value * 10 ** TokenizedStrategy.decimals() / price;
-        // console.log("endValue: ", endValue);
-        // // @todo check if need asset decimals here
-        // return endValue;
-
         return
             ((collateral - debt) * 10 ** TokenizedStrategy.decimals()) / price;
     }
@@ -593,6 +560,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     // AaveComp means supply to aave, borrow from aave, supply to compound
     // CompAave means supply to compound, borrow from compound, supply to aave
 
+    /// @dev borrow borrowAsset from aave and supply it to compound
+    /// @param _amount amount to borrow in asset value
     function _flowAaveBorrowCompSupply(uint256 _amount) internal {
         _amount = _convertAssetToBorrow(_amount);
         aaveLendingPool.borrow(
@@ -605,10 +574,38 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         _compSupply(_amount);
     }
 
+    /// @dev withdraw borrowAsset from compound and repay it to aave
+    /// @param _amount amount to withdraw in asset value
     function _flowAaveCompRepay(uint256 _amount) internal returns (uint256) {
         _amount = _convertAssetToBorrow(_amount);
         _amount = _compWithdraw(_amount);
         _aaveRepay(_amount);
         return _amount;
+    }
+
+    /// @dev convert borrow asset to asset, use aave oracle to get price
+    /// both comp and aave use chainlink oracle as main oracle
+    /// @param _amount amount of borrow asset to convert to asset
+    function _convertBorrowToAsset(
+        uint256 _amount
+    ) internal view returns (uint256) {
+        uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
+        uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
+        // @todo defined flow for 0, maybe revert?
+        // wbtc = 8 decimasl / usdc = 6 decimals -> * 1e2 to get the same amount
+        return (_amount * borrowPrice * 10 ** 2) / assetPrice;
+    }
+
+    /// @dev convert asset to borrow asset, use aave oracle to get price
+    /// both comp and aave use chainlink oracle as main oracle
+    /// @param _amount amount of asset to convert to borrow asset
+    function _convertAssetToBorrow(
+        uint256 _amount
+    ) internal view returns (uint256) {
+        uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
+        uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
+        // @todo extract decimals for borrow asset,
+        // wbtc = 8 decimasl / usdc = 6 decimals -> / 1e2 to get the same amount
+        return (_amount * assetPrice) / borrowPrice / 10 ** 2;
     }
 }
