@@ -456,7 +456,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
                 .currentVariableBorrowRate;
     }
 
-    function _aaveSupplyRate(uint256 _amount) internal view returns (uint256) {
+    function _aaveSupplyRate(int256 _amount) internal view returns (uint256) {
         // return aaveLendingPool.getReserveData(asset).currentLiquidityRate;
 
         (
@@ -474,23 +474,22 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
         ) = aaveProtocolDataProvider.getReserveData(asset);
 
-        uint256 availableLiquidity = ERC20(asset).balanceOf(address(aToken));
-
-        uint256 newLiquidity = availableLiquidity + _amount;
-
-        uint256 totalLiquidity = newLiquidity +
-            unbacked +
-            totalStableDebt +
-            totalVariableDebt;
-
         (, , , , uint256 reserveFactor, , , , , ) = aaveProtocolDataProvider
             .getReserveConfigurationData(asset);
+
+        uint256 liquidityAdded;
+        uint256 liquidityTaken;
+        if (_amount > 0) {
+            liquidityAdded = uint256(_amount);
+        } else {
+            liquidityTaken = uint256(-_amount);
+        }
 
         DataTypesV3.CalculateInterestRatesParams memory params = DataTypesV3
             .CalculateInterestRatesParams(
                 unbacked,
-                _amount,
-                0,
+                liquidityAdded,
+                liquidityTaken,
                 totalStableDebt,
                 totalVariableDebt,
                 averageStableBorrowRate,
