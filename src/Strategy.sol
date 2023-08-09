@@ -22,16 +22,14 @@ import {IComet} from "./interfaces/Compound/IComet.sol";
 contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     using SafeERC20 for ERC20;
 
-    // Aave
     address public immutable borrowAsset;
+    IAToken public immutable borrowAToken;
     IAToken public immutable aToken;
     IPool public immutable aaveLendingPool;
     IPriceOracleGetter public immutable aavePriceOracle;
     IProtocolDataProvider public immutable aaveProtocolDataProvider;
     IReserveInterestRateStrategy public immutable supplyInterestRate;
     IReserveInterestRateStrategy public immutable borrowInterestRate;
-
-    // Compound
     IComet public immutable comet;
 
     uint256 internal constant AAVE_PRICE_ORACLE_BASE = 1e8;
@@ -39,6 +37,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     uint16 internal constant REF_CODE = 0; // 0 = No referral code
     uint256 internal constant LTV_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000; // prettier-ignore
     uint256 internal constant MAX_BPS = 10_000;
+    uint256 internal constant SECONDS_PER_YEAR = 365 days;
+    uint256 internal constant WAD = 1e18;
+
     /// @notice value in basis points(BPS) max value is 10_000
     uint256 public ltvTarget;
 
@@ -69,7 +70,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
         DataTypesV3.ReserveData memory borrowConfig = aaveLendingPool
             .getReserveData(_borrowAsset);
-        IAToken borrowAToken = IAToken(borrowConfig.aTokenAddress);
+        borrowAToken = IAToken(borrowConfig.aTokenAddress);
         borrowInterestRate = IReserveInterestRateStrategy(
             borrowConfig.interestRateStrategyAddress
         );
@@ -421,8 +422,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     // --- AAVE HELPERS --- //
 
-    /// @dev repay debt to aave in borrow asset must be reaculated
-    /// @param _amount amount to repay in borrow asset
+    /// @dev repay debt to aave in borrowAsset must be reaculated
+    /// @param _amount amount to repay in borrowAsset
     function _aaveRepay(uint256 _amount) internal {
         (, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
@@ -439,15 +440,14 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         }
     }
 
-    function _aaveBorrowRate() internal view returns (uint256) {
-        // @todo implement apy calculation for supplied amount
-        return
-            aaveLendingPool
-                .getReserveData(borrowAsset)
-                .currentVariableBorrowRate;
-    }
-
-    function _aaveSupplyRate(int256 _amount) internal view returns (uint256) {
+    /// @dev calcualte interest rates for borrowAsset for supplied/removed amount
+    /// @param _amount amount in borrowAsset
+    /// @return supplyRate supply rate
+    /// @return borrowRate borrow rate
+    // @note can use uint and bool for add/remove
+    function _aaveRates(
+        int256 _amount
+    ) internal view returns (uint256 supplyRate, uint256 borrowRate) {
         (
             uint256 unbacked,
             ,
@@ -461,7 +461,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             ,
             ,
 
-        ) = aaveProtocolDataProvider.getReserveData(asset);
+        ) = aaveProtocolDataProvider.getReserveData(borrowAsset);
 
         (, , , , uint256 reserveFactor, , , , , ) = aaveProtocolDataProvider
             .getReserveConfigurationData(asset);
@@ -483,16 +483,18 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
                 totalVariableDebt,
                 averageStableBorrowRate,
                 reserveFactor,
-                asset,
-                address(aToken)
+                borrowAsset,
+                address(borrowAToken)
             );
-        (uint256 newLiquidityRate, , ) = supplyInterestRate
-            .calculateInterestRates(params);
-        return newLiquidityRate / 1e9; // divided by 1e9 to go from Ray to Wad
+        (supplyRate, , borrowRate) = supplyInterestRate.calculateInterestRates(
+            params
+        );
+        supplyRate = supplyRate / 1e9; // divided by 1e9 to go from Ray to Wad
+        borrowRate = borrowRate / 1e9; // divided by 1e9 to go from Ray to Wad
     }
 
     /// @dev calculate new ltv after supplying
-    /// @param _amount amount to supply
+    /// @param _amount amount in asset
     /// @return new ltv after supplying _amount
     function _aaveNewLtvSupply(
         uint256 _amount
@@ -505,7 +507,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     }
 
     /// @dev calculate new ltv after borrowing
-    /// @param _amount amount of debt to in asset
+    /// @param _amount amount in asset
     /// @return ltv after borrowing _amount
     function _aaveNewLtvBorrow(
         uint256 _amount
@@ -556,6 +558,36 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         return _convertBorrowToAsset(borrowBalance);
     }
 
+    /// @dev caluclate supply rate for borrowAsset for given amount
+    /// @param _amount amount in borrowAsset to supply to compound
+    /// @return supply rate in WAD
+    function _compSupplyRate(int256 _amount) internal returns (uint256) {
+        uint256 borrows = comet.totalBorrow();
+        uint256 supply = comet.totalSupply();
+        uint256 utiliaztion = (borrows * WAD) /
+            uint256(int256(supply) + _amount);
+        uint256 supplyRate = comet.getSupplyRate(utiliaztion) *
+            SECONDS_PER_YEAR;
+
+        // @todo add reward rate
+        return supplyRate;
+    }
+
+    /// @dev caluclate borrow rate for borrowAsset for given amount
+    /// @param _amount amount in borrowAsset to borrow from compound
+    /// @return borrow rate in WAD
+    function _compBorrowRate(int256 _amount) internal returns (uint256) {
+        uint256 borrows = comet.totalBorrow();
+        uint256 supply = comet.totalSupply();
+        uint256 utiliaztion = (uint256(int256(borrows) + _amount) * WAD) /
+            supply;
+        uint256 borrowRate = comet.getBorrowRate(utiliaztion) *
+            SECONDS_PER_YEAR;
+
+        // @todo add reward rate
+        return borrowRate;
+    }
+
     // --- FLOW HELPERS --- //
     // AaveComp means supply to aave, borrow from aave, supply to compound
     // CompAave means supply to compound, borrow from compound, supply to aave
@@ -583,9 +615,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         return _amount;
     }
 
-    /// @dev convert borrow asset to asset, use aave oracle to get price
+    /// @dev convert borrowAsset to asset, use aave oracle to get price
     /// both comp and aave use chainlink oracle as main oracle
-    /// @param _amount amount of borrow asset to convert to asset
+    /// @param _amount amount of borrowAsset to convert to asset
     function _convertBorrowToAsset(
         uint256 _amount
     ) internal view returns (uint256) {
@@ -596,15 +628,15 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         return (_amount * borrowPrice * 10 ** 2) / assetPrice;
     }
 
-    /// @dev convert asset to borrow asset, use aave oracle to get price
+    /// @dev convert asset to borrowAsset, use aave oracle to get price
     /// both comp and aave use chainlink oracle as main oracle
-    /// @param _amount amount of asset to convert to borrow asset
+    /// @param _amount amount of asset to convert to borrowAsset
     function _convertAssetToBorrow(
         uint256 _amount
     ) internal view returns (uint256) {
         uint256 assetPrice = aavePriceOracle.getAssetPrice(asset);
         uint256 borrowPrice = aavePriceOracle.getAssetPrice(borrowAsset);
-        // @todo extract decimals for borrow asset,
+        // @todo extract decimals for borrowAsset,
         // wbtc = 8 decimasl / usdc = 6 decimals -> / 1e2 to get the same amount
         return (_amount * assetPrice) / borrowPrice / 10 ** 2;
     }
