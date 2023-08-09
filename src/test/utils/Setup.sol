@@ -72,6 +72,7 @@ contract Setup is ExtendedTest, IEvents {
 
     function setUpStrategy() public returns (address) {
         address aavePoolAddressProvider = 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb;
+        address comet = 0xF25212E676D1F7F89Cd72fFEe66158f541246445;
         address borrowAsset = tokenAddrs["USDC"];
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
@@ -80,7 +81,8 @@ contract Setup is ExtendedTest, IEvents {
                     address(asset),
                     "Tokenized Strategy",
                     borrowAsset,
-                    aavePoolAddressProvider
+                    aavePoolAddressProvider,
+                    comet
                 )
             )
         );
