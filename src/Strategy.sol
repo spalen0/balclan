@@ -29,11 +29,12 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     IPool public immutable aaveLendingPool;
     IPriceOracleGetter public immutable aavePriceOracle;
     IProtocolDataProvider public immutable aaveProtocolDataProvider;
+    /// @notice The interest rate strategy contract for the borrow asset.
     IReserveInterestRateStrategy public immutable supplyInterestRate;
+    /// @notice The interest rate strategy contract for the borrow asset.
     IReserveInterestRateStrategy public immutable borrowInterestRate;
     IComet public immutable comet;
     ICometRewards public immutable cometRewards;
-    address public immutable compToken;
     uint256 public immutable cometBaseMantissa;
     uint256 public immutable cometBaseIndexScale;
 
@@ -46,6 +47,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     uint256 internal constant SECONDS_PER_YEAR = 365 days;
     uint256 internal constant DAYS_PER_YEAR = 365;
     uint256 internal constant WAD = 1e18;
+    uint256 internal constant WAD_RAY_RATIO = 1e9;
+    // @todo think about changing to variable to allow setting by yChad
+    address internal constant COMP_PRICE_FEED =
+        0x2A8758b7257102461BC958279054e372C2b1bDE6; // https://data.chain.link/polygon/mainnet/crypto-usd/comp-usd
 
     /// @notice value in basis points(BPS) max value is 10_000
     uint256 public ltvTarget;
@@ -72,14 +77,14 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         DataTypesV3.ReserveData memory supplyConfig = aaveLendingPool
             .getReserveData(_asset);
         aToken = IAToken(supplyConfig.aTokenAddress);
-        supplyInterestRate = IReserveInterestRateStrategy(
-            supplyConfig.interestRateStrategyAddress
-        );
 
         DataTypesV3.ReserveData memory borrowConfig = aaveLendingPool
             .getReserveData(_borrowAsset);
         borrowAToken = IAToken(borrowConfig.aTokenAddress);
         borrowInterestRate = IReserveInterestRateStrategy(
+            borrowConfig.interestRateStrategyAddress
+        );
+        supplyInterestRate = IReserveInterestRateStrategy(
             borrowConfig.interestRateStrategyAddress
         );
 
@@ -109,7 +114,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         require(cometBaseIndexScale > 0, "!cometBaseIndexScale");
 
         cometRewards = ICometRewards(_cometRewards);
-        compToken = cometRewards.rewardConfig(_comet).token;
+        address compToken = cometRewards.rewardConfig(_comet).token;
         require(compToken != address(0), "!compToken");
 
         borrowAsset = _borrowAsset;
@@ -290,7 +295,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             }
         }
 
-        _totalAssets = _aaveFunds() + _compFunds();
+        _totalAssets = aaveFunds() + compFunds();
     }
 
     // @todo implement
@@ -461,9 +466,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @return supplyRate supply rate
     /// @return borrowRate borrow rate
     // @note can use uint and bool for add/remove
-    function _aaveRates(
+    function aaveRates(
         int256 _amount
-    ) internal view returns (uint256 supplyRate, uint256 borrowRate) {
+    ) public view returns (uint256 supplyRate, uint256 borrowRate) {
         (
             uint256 unbacked,
             ,
@@ -480,7 +485,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         ) = aaveProtocolDataProvider.getReserveData(borrowAsset);
 
         (, , , , uint256 reserveFactor, , , , , ) = aaveProtocolDataProvider
-            .getReserveConfigurationData(asset);
+            .getReserveConfigurationData(borrowAsset);
 
         uint256 liquidityAdded;
         uint256 liquidityTaken;
@@ -505,8 +510,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         (supplyRate, , borrowRate) = supplyInterestRate.calculateInterestRates(
             params
         );
-        supplyRate = supplyRate / 1e9; // divided by 1e9 to go from Ray to Wad
-        borrowRate = borrowRate / 1e9; // divided by 1e9 to go from Ray to Wad
+        supplyRate = supplyRate / WAD_RAY_RATIO;
+        borrowRate = borrowRate / WAD_RAY_RATIO;
     }
 
     /// @dev calculate new ltv after supplying
@@ -541,7 +546,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     /// @dev Get current possition in aave, collateral - debt in asset value
     /// @return funds in asset value
-    function _aaveFunds() internal view returns (uint256) {
+    function aaveFunds() public view returns (uint256) {
         (uint256 collateral, uint256 debt, , , , ) = aaveLendingPool
             .getUserAccountData(address(this));
         uint256 price = aavePriceOracle.getAssetPrice(asset);
@@ -569,7 +574,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     /// @dev asset supplied to compound
     /// @return funds in asset value
-    function _compFunds() internal returns (uint256) {
+    function compFunds() public returns (uint256) {
         uint256 borrowBalance = comet.balanceOf(address(this));
         return _convertBorrowToAsset(borrowBalance);
     }
@@ -577,7 +582,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @dev caluclate supply rate for borrowAsset for given amount
     /// @param _amount amount in borrowAsset to supply to compound
     /// @return supply rate in WAD
-    function _compSupplyRate(int256 _amount) internal returns (uint256) {
+    function compSupplyRate(int256 _amount) public returns (uint256) {
         uint256 borrows = comet.totalBorrow();
         uint256 supply = comet.totalSupply();
         uint256 utiliaztion = (borrows * WAD) /
@@ -591,7 +596,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @dev caluclate borrow rate for borrowAsset for given amount
     /// @param _amount amount in borrowAsset to borrow from compound
     /// @return borrow rate in WAD
-    function _compBorrowRate(int256 _amount) internal returns (uint256) {
+    function compBorrowRate(int256 _amount) public returns (uint256) {
         uint256 borrows = comet.totalBorrow();
         uint256 supply = comet.totalSupply();
         uint256 utiliaztion = (uint256(int256(borrows) + _amount) * WAD) /
@@ -610,11 +615,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             cometBaseIndexScale) / cometBaseMantissa;
         if (rewardToSuppliersPerDay == 0) return 0;
 
-        address compPriceFeed = _compPriceFeedAddress(compToken);
-        uint256 rewardTokenPriceInUsd = _compCompoundPrice(compPriceFeed);
-        uint256 assetPriceInUsd = _compCompoundPrice(
-            comet.baseTokenPriceFeed()
-        );
+        uint256 rewardTokenPriceInUsd = _compPrice(COMP_PRICE_FEED);
+        uint256 assetPriceInUsd = _compPrice(comet.baseTokenPriceFeed());
         uint256 assetTotalSupply = uint256(
             int256(comet.totalSupply()) + _amount
         );
@@ -631,11 +633,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             cometBaseIndexScale) / cometBaseMantissa;
         if (rewardToBowwersPerDay == 0) return 0;
 
-        address compPriceFeed = _compPriceFeedAddress(compToken);
-        uint256 rewardTokenPriceInUsd = _compCompoundPrice(compPriceFeed);
-        uint256 assetPriceInUsd = _compCompoundPrice(
-            comet.baseTokenPriceFeed()
-        );
+        uint256 rewardTokenPriceInUsd = _compPrice(COMP_PRICE_FEED);
+        uint256 assetPriceInUsd = _compPrice(comet.baseTokenPriceFeed());
         uint256 assetTotalBorrow = uint256(
             int256(comet.totalBorrow()) + _amoount
         );
@@ -644,16 +643,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
                 (assetTotalBorrow * assetPriceInUsd)) * DAYS_PER_YEAR;
     }
 
-    function _compPriceFeedAddress(
-        address asset
-    ) internal view returns (address) {
-        if (asset == comet.baseToken()) {
-            return comet.baseTokenPriceFeed();
-        }
-        return comet.getAssetInfoByAddress(asset).priceFeed;
-    }
-
-    function _compCompoundPrice(
+    /// @dev get price of asset from compound
+    /// @param singleAssetPriceFeed price feed address for wanted asset
+    /// @return price of asset in USD
+    function _compPrice(
         address singleAssetPriceFeed
     ) internal view returns (uint256) {
         return comet.getPrice(singleAssetPriceFeed);
