@@ -16,6 +16,7 @@ import {IReserveInterestRateStrategy} from "./interfaces/Aave/V3/IReserveInteres
 import {IProtocolDataProvider} from "./interfaces/Aave/V3/IProtocolDataProvider.sol";
 
 import {IComet} from "./interfaces/Compound/IComet.sol";
+import {ICometRewards} from "./interfaces/Compound/ICometRewards.sol";
 
 // import "forge-std/console.sol";
 
@@ -31,13 +32,19 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     IReserveInterestRateStrategy public immutable supplyInterestRate;
     IReserveInterestRateStrategy public immutable borrowInterestRate;
     IComet public immutable comet;
+    ICometRewards public immutable cometRewards;
+    address public immutable compToken;
+    uint256 public immutable cometBaseMantissa;
+    uint256 public immutable cometBaseIndexScale;
 
     uint256 internal constant AAVE_PRICE_ORACLE_BASE = 1e8;
     uint256 internal constant RATE_MODE = 2; // 2 = Stable, 1 = Variable
     uint16 internal constant REF_CODE = 0; // 0 = No referral code
     uint256 internal constant LTV_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000; // prettier-ignore
     uint256 internal constant MAX_BPS = 10_000;
+    uint256 internal constant SECONDS_PER_DAY = 24 hours;
     uint256 internal constant SECONDS_PER_YEAR = 365 days;
+    uint256 internal constant DAYS_PER_YEAR = 365;
     uint256 internal constant WAD = 1e18;
 
     /// @notice value in basis points(BPS) max value is 10_000
@@ -48,7 +55,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         string memory _name,
         address _borrowAsset,
         address _aavePoolDataProvider,
-        address _comet
+        address _comet,
+        address _cometRewards
     ) BaseTokenizedStrategy(_asset, _name) {
         IPoolAddressesProvider aavePoolDataProvider = IPoolAddressesProvider(
             _aavePoolDataProvider
@@ -95,6 +103,14 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         comet = IComet(_comet);
         require(comet.baseToken() == _borrowAsset, "!baseToken");
         ERC20(_borrowAsset).safeApprove(_comet, type(uint256).max);
+        cometBaseMantissa = comet.baseScale();
+        cometBaseIndexScale = comet.trackingIndexScale(); // @todo verify trackingIndexScale is used instead of baseIndexScale
+        require(cometBaseMantissa > 0, "!cometBaseMantissa");
+        require(cometBaseIndexScale > 0, "!cometBaseIndexScale");
+
+        cometRewards = ICometRewards(_cometRewards);
+        compToken = cometRewards.rewardConfig(_comet).token;
+        require(compToken != address(0), "!compToken");
 
         borrowAsset = _borrowAsset;
         ltvTarget = 50_00; // 50%
@@ -569,8 +585,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 supplyRate = comet.getSupplyRate(utiliaztion) *
             SECONDS_PER_YEAR;
 
-        // @todo add reward rate
-        return supplyRate;
+        return supplyRate + _compRewardForSupplyBase(_amount);
     }
 
     /// @dev caluclate borrow rate for borrowAsset for given amount
@@ -584,8 +599,64 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 borrowRate = comet.getBorrowRate(utiliaztion) *
             SECONDS_PER_YEAR;
 
-        // @todo add reward rate
-        return borrowRate;
+        return borrowRate + _compRewardForBorrowBase(_amount);
+    }
+
+    function _compRewardForSupplyBase(
+        int256 _amount
+    ) internal view returns (uint256) {
+        uint256 rewardToSuppliersPerDay = (comet.baseTrackingSupplySpeed() *
+            SECONDS_PER_DAY *
+            cometBaseIndexScale) / cometBaseMantissa;
+        if (rewardToSuppliersPerDay == 0) return 0;
+
+        address compPriceFeed = _compPriceFeedAddress(compToken);
+        uint256 rewardTokenPriceInUsd = _compCompoundPrice(compPriceFeed);
+        uint256 assetPriceInUsd = _compCompoundPrice(
+            comet.baseTokenPriceFeed()
+        );
+        uint256 assetTotalSupply = uint256(
+            int256(comet.totalSupply()) + _amount
+        );
+        return
+            ((rewardTokenPriceInUsd * rewardToSuppliersPerDay) /
+                (assetTotalSupply * assetPriceInUsd)) * DAYS_PER_YEAR;
+    }
+
+    function _compRewardForBorrowBase(
+        int256 _amoount
+    ) internal view returns (uint256) {
+        uint256 rewardToBowwersPerDay = (comet.baseTrackingBorrowSpeed() *
+            SECONDS_PER_DAY *
+            cometBaseIndexScale) / cometBaseMantissa;
+        if (rewardToBowwersPerDay == 0) return 0;
+
+        address compPriceFeed = _compPriceFeedAddress(compToken);
+        uint256 rewardTokenPriceInUsd = _compCompoundPrice(compPriceFeed);
+        uint256 assetPriceInUsd = _compCompoundPrice(
+            comet.baseTokenPriceFeed()
+        );
+        uint256 assetTotalBorrow = uint256(
+            int256(comet.totalBorrow()) + _amoount
+        );
+        return
+            ((rewardTokenPriceInUsd * rewardToBowwersPerDay) /
+                (assetTotalBorrow * assetPriceInUsd)) * DAYS_PER_YEAR;
+    }
+
+    function _compPriceFeedAddress(
+        address asset
+    ) internal view returns (address) {
+        if (asset == comet.baseToken()) {
+            return comet.baseTokenPriceFeed();
+        }
+        return comet.getAssetInfoByAddress(asset).priceFeed;
+    }
+
+    function _compCompoundPrice(
+        address singleAssetPriceFeed
+    ) internal view returns (uint256) {
+        return comet.getPrice(singleAssetPriceFeed);
     }
 
     // --- FLOW HELPERS --- //
