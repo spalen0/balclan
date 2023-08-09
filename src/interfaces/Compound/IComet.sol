@@ -13,6 +13,16 @@ interface IComet {
         uint128 supplyCap;
     }
 
+    struct UserCollateral {
+        uint128 balance;
+        uint128 _reserved;
+    }
+
+    function userCollateral(
+        address user,
+        address token
+    ) external view returns (UserCollateral memory);
+
     function supply(address asset, uint amount) external;
 
     function supplyTo(address dst, address asset, uint amount) external;
