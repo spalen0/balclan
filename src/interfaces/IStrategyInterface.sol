@@ -10,4 +10,18 @@ interface IStrategyInterface is IStrategy, IUniswapV3Swapper {
     function claimRewards() external view returns (bool);
 
     function setUniFees(address _token0, address _token1, uint24 _fee) external;
+
+    function minAmountToSell() external view returns (uint256);
+
+    function setMinAmountToSell(uint256 _minAmountToSell) external;
+
+    function ltvTarget() external view returns (uint256);
+
+    function setLtvTarget(uint256 _ltvTarget) external;
+
+    function aaveRates(int256 _amount) external view returns (uint256, uint256);
+
+    function compSupplyRate(int _amount) external view returns (uint256);
+
+    function compBorrowRate(int _amount) external view returns (uint256);
 }
