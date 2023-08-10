@@ -45,7 +45,7 @@ contract OperationTest is Setup {
 
         // Withdraw all funds
         vm.prank(user);
-        strategy.redeem(_amount, user, user);
+        strategy.redeem(_amount / 2, user, user);
 
         assertGe(
             asset.balanceOf(user),

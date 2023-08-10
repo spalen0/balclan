@@ -58,7 +58,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     uint256 public lowerLtv;
     uint256 public upperLtv;
 
-    uint256 public mode; // 0 --> supply/borrow AAVE, supply Compound, 1 --> supply/borrow Compound, supply AAVE
+    uint256 public mode = 0; // 0 --> supply/borrow AAVE, supply Compound, 1 --> supply/borrow Compound, supply AAVE
 
     constructor(
         address _asset,
@@ -113,6 +113,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         comet = IComet(_comet);
         require(comet.baseToken() == _borrowAsset, "!baseToken");
         ERC20(_borrowAsset).safeApprove(_comet, type(uint256).max);
+        ERC20(asset).safeApprove(_comet, type(uint256).max);
         cometBaseMantissa = comet.baseScale();
         cometBaseIndexScale = comet.trackingIndexScale(); // @todo verify trackingIndexScale is used instead of baseIndexScale
         require(cometBaseMantissa > 0, "!cometBaseMantissa");
@@ -300,7 +301,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             toWithdraw = convertUSDToToken(toWithdraw, borrowAsset);
 
             // withdraw from aave
-            _aaveWithdraw(toWithdraw);
+            _aaveWithdraw(toWithdraw, borrowAsset);
 
             // repay comp
             _compSupply(toWithdraw, borrowAsset);
@@ -371,14 +372,45 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        _amount = _convertAssetToBorrow(_amount);
+        uint256 amountInUSDC = _convertAssetToBorrow(_amount);
 
         // 0 --> supply/borrow AAVE, supply Compound
         if (mode == 0) {
-            _compWithdraw(_amount, borrowAsset); // I am assuming we will have amountInUSDC in USDC idle
+            // we can withdraw from compound up to whatever we have supplied
+            amountInUSDC = Math.min(_compSuppliedFundsInUSDC(), amountInUSDC);
+
+            // withdraw the necessary or all the USDC from Compound
+            _compWithdraw(amountInUSDC, borrowAsset);
+
+            // repay the necessary or all the USDC from Compound
+            // if strategy is healthy we should end up 0 debt in the AAVE here
+            _aaveRepay(amountInUSDC);
+
+            // withdraw the requested amount from the aave
+            _aaveWithdraw(_amount, asset);
+
+            // rebalance if needed
             _rebalanceMode0();
+
+            // 1 --> supply/borrow Compound, supply AAVE
         } else {
-            _aaveWithdraw(_amount); // I am assuming we will have amountInUSDC in USDC idle
+            // we can withdraw from aave up to whatever we have supplied
+            amountInUSDC = Math.min(
+                borrowAToken.balanceOf(address(this)),
+                amountInUSDC
+            );
+
+            // withdraw the necessary or all the USDC from aave
+            _aaveWithdraw(amountInUSDC, borrowAsset);
+
+            // repay the necessary or all the USDC from aave
+            // if strategy is healthy we should end up 0 debt in the compound here
+            _compSupply(amountInUSDC, borrowAsset);
+
+            // withdraw the requested amount from the compound
+            _compWithdraw(_amount, asset);
+
+            // rebalance if needed
             _rebalanceMode1();
         }
     }
@@ -414,7 +446,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             _sellRewards();
             uint256 idleAssets = ERC20(asset).balanceOf(address(this));
             // deploy idle, also rebalances
-            _deployFunds(idleAssets);
+            if (idleAssets != 0) _deployFunds(idleAssets);
         }
 
         // we have supply & borrow in AAVE and supply in Compound
@@ -539,9 +571,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     function availableWithdrawLimit(
         address /*_owner*/
     ) public view override returns (uint256) {
-        return
-            TokenizedStrategy.totalIdle() +
-            ERC20(asset).balanceOf(address(aToken));
+        // return
+        // 	TokenizedStrategy.totalIdle() + ERC20(asset).balanceOf(address(aToken));
+
+        return type(uint256).max;
     }
 
     /**
@@ -589,27 +622,15 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @dev repay debt to aave in borrowAsset must be reaculated
     /// @param _amount amount to repay in borrowAsset
     function _aaveRepay(uint256 _amount) private {
-        (, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
-            address(this)
-        );
-        // aave reverts if you try to repay 0 debt
-        if (debt > 0) {
-            // @todo IMPORTANT: fix the problem with paying for borrowing rate
-            aaveLendingPool.repay(
-                borrowAsset,
-                _amount,
-                RATE_MODE,
-                address(this)
-            );
-        }
+        aaveLendingPool.repay(borrowAsset, _amount, RATE_MODE, address(this));
     }
 
     function _aaveSupply(uint256 amount) private {
         aaveLendingPool.supply(asset, amount, address(this), REF_CODE);
     }
 
-    function _aaveWithdraw(uint256 amount) private {
-        aaveLendingPool.withdraw(asset, amount, address(this));
+    function _aaveWithdraw(uint256 amount, address token) private {
+        aaveLendingPool.withdraw(token, amount, address(this));
     }
 
     function _aaveBorrow(uint256 amount) private {
@@ -780,9 +801,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     /// @dev asset supplied to compound
     /// @return funds in asset value
-    function compFunds() public view returns (uint256) {
-        uint256 borrowBalance = comet.balanceOf(address(this));
-        return _convertBorrowToAsset(borrowBalance);
+    function _compSuppliedFundsInUSDC() public view returns (uint256) {
+        return comet.balanceOf(address(this));
     }
 
     /// @dev caluclate supply rate for borrowAsset for given amount
@@ -917,6 +937,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 _amount,
         address _token
     ) public view returns (uint256) {
+        if (_amount == 0) return 0;
         uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
         uint256 tokenDecimals = IERC20Metadata(_token).decimals();
 
@@ -932,6 +953,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 _amount,
         address _token
     ) public view returns (uint256) {
+        if (_amount == 0) return 0;
         uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
         uint256 tokenDecimals = IERC20Metadata(_token).decimals();
 
