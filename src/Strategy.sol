@@ -533,17 +533,21 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
         // @todo add modes
-    	_compWithdraw(type(uint256).max, borrowAsset);
-    	_aaveRepay(type(uint256).max);
+        _compWithdraw(type(uint256).max, borrowAsset);
+        _aaveRepay(type(uint256).max);
 
-    	uint256 aaveMax = Math.min(
-    		ERC20(asset).balanceOf(address(aToken)),
-    		aToken.balanceOf(address(this))
-    	);
+        uint256 aaveMax = Math.min(
+            ERC20(asset).balanceOf(address(aToken)),
+            aToken.balanceOf(address(this))
+        );
 
-    	// withdraw as much as possible from aave
-    	// slither-disable-next-line unused-return
-    	aaveLendingPool.withdraw(asset, Math.min(_amount, aaveMax), address(this));
+        // withdraw as much as possible from aave
+        // slither-disable-next-line unused-return
+        aaveLendingPool.withdraw(
+            asset,
+            Math.min(_amount, aaveMax),
+            address(this)
+        );
     }
 
     // --- AAVE HELPERS --- //
