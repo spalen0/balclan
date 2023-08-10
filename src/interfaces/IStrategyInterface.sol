@@ -19,6 +19,14 @@ interface IStrategyInterface is IStrategy, IUniswapV3Swapper {
 
     function setLtvTarget(uint256 _ltvTarget) external;
 
+    function lowerLtv() external view returns (uint256);
+
+    function setLowerLtv(uint256 _lowerLtv) external;
+
+    function upperLtv() external view returns (uint256);
+
+    function setUpperLtv(uint256 _upperLtv) external;
+
     function aaveRates(int256 _amount) external view returns (uint256, uint256);
 
     function compSupplyRate(int _amount) external view returns (uint256);
