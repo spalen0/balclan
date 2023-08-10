@@ -15,7 +15,6 @@ contract DecimalsTest is Setup {
             amount,
             tokenAddrs["WBTC"]
         );
-        console.log("converted: %s", converted);
         uint256 convertedUsd = converted / 1e18; // usd is 18 decimals
         assertLt(convertedUsd, 40_000, "WBTC should be less than $40k");
         assertGt(convertedUsd, 20_000, "WBTC should be more than $20k");
@@ -27,7 +26,6 @@ contract DecimalsTest is Setup {
             amount,
             tokenAddrs["WBTC"]
         );
-        console.log("converted: %s", converted);
         uint256 convertedWbtc = converted / 1e8;
         assertEq(convertedWbtc, 1, "30k USDC should be 1 WBTC");
     }

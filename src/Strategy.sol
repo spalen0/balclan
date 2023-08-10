@@ -124,6 +124,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
         borrowAsset = _borrowAsset;
         ltvTarget = 50_00; // 50%
+        lowerLtv = 40_00; // 40%
+        upperLtv = 60_00; // 60%
 
         // Make approve the lending pool for cheaper deposits.
         ERC20(_asset).safeApprove(address(aaveLendingPool), type(uint256).max);
@@ -369,7 +371,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        _amount = convertTokenToUSD(_amount, asset);
+        _amount = _convertAssetToBorrow(_amount);
 
         // 0 --> supply/borrow AAVE, supply Compound
         if (mode == 0) {
