@@ -27,6 +27,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     address public immutable borrowAsset;
     IAToken public immutable borrowAToken;
     IAToken public immutable aToken;
+    IERC20Metadata public constant borrowDebtToken =
+        IERC20Metadata(0xFCCf3cAbbe80101232d343252614b6A3eE81C989); // for test
     IPool public immutable aaveLendingPool;
     IPriceOracleGetter public immutable aavePriceOracle;
     IProtocolDataProvider public immutable aaveProtocolDataProvider;
@@ -57,6 +59,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     uint256 public ltvTarget;
     uint256 public lowerLtv;
     uint256 public upperLtv;
+
+    uint256 public supplyDust = 1e3;
 
     uint256 public mode = 0; // 0 --> supply/borrow AAVE, supply Compound, 1 --> supply/borrow Compound, supply AAVE
 
@@ -244,6 +248,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         // both 18 decimals
         (uint256 supply, uint256 borrow) = _aaveSupplyBorrowBalancesInUSD();
 
+        if (supply < supplyDust) return;
+
         // current ltv, including our supply
         uint256 currentLTV = _getLTV(supply, borrow);
 
@@ -384,10 +390,15 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
             // repay the necessary or all the USDC from Compound
             // if strategy is healthy we should end up 0 debt in the AAVE here
-            _aaveRepay(amountInUSDC);
+            _aaveRepay(
+                Math.min(amountInUSDC, borrowDebtToken.balanceOf(address(this)))
+            );
 
             // withdraw the requested amount from the aave
-            _aaveWithdraw(_amount, asset);
+            _aaveWithdraw(
+                Math.min(_amount, aToken.balanceOf(address(this))),
+                asset
+            );
 
             // rebalance if needed
             _rebalanceMode0();
