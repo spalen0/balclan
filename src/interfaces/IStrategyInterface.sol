@@ -25,10 +25,13 @@ interface IStrategyInterface is IStrategy, IUniswapV3Swapper {
 
     function compBorrowRate(int _amount) external view returns (uint256);
 
-    function convertTokenToUSD(uint256 _amount, address _token)
-        external
-        view
-        returns (uint256);
+    function convertTokenToUSD(
+        uint256 _amount,
+        address _token
+    ) external view returns (uint256);
 
-    function convertUSDToToken(uint256 _amount, address _token) external view returns (uint256);
+    function convertUSDToToken(
+        uint256 _amount,
+        address _token
+    ) external view returns (uint256);
 }

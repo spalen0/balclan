@@ -140,10 +140,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             IERC20Metadata(_borrowAsset).decimals() < 19,
             "_borrowAsset.decimals>18"
         );
-        require(
-            IERC20Metadata(_asset).decimals() < 19,
-            "_asset.decimals>18"
-        );
+        require(IERC20Metadata(_asset).decimals() < 19, "_asset.decimals>18");
     }
 
     /**
@@ -196,7 +193,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         require(_ltvTarget < maxLtv, "!ltvTarget");
         ltvTarget = _ltvTarget;
     }
-    
+
     /// @notice set lower bound for rebalance
     /// @param _lowerLtv lower bound for rebalance in BPS
     function setLowerLtv(uint256 _lowerLtv) external onlyManagement {
@@ -414,53 +411,29 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         if (!TokenizedStrategy.isShutdown()) {
             _sellRewards();
             uint256 idleAssets = ERC20(asset).balanceOf(address(this));
-            uint256 assetBalanceTotalLending;
-            uint256 usdBalanceTotalLending;
-            if (mode == 0) {
-                // we have supply & borrow in AAVE and supply in Compound
-
-                uint256 usdBalanceCompSupplied = _compSuppliedFundsInUSD();
-                (
-                    uint256 usdBalanceAaveSupplied,
-                    uint256 usdBalanceAaveBorrowed
-                ) = _aaveSupplyBorrowBalancesInUSD();
-
-                usdBalanceTotalLending =
-                    usdBalanceCompSupplied +
-                    usdBalanceAaveSupplied -
-                    usdBalanceAaveBorrowed;
-            } else {
-                // we have supply & borrow in Compound and supply in AAVE
-
-                (
-                    uint256 usdBalanceAaveSupplied,
-
-                ) = _aaveSupplyBorrowBalancesInUSD();
-
-                uint256 usdBalanceCompBorrowed = _compBorrowedFundsInUSD();
-
-                uint256 usdBalanceCompCollateral = _compCollateralBalanceInUSD(
-                    asset
-                );
-
-                usdBalanceTotalLending =
-                    usdBalanceAaveSupplied +
-                    usdBalanceCompCollateral -
-                    usdBalanceCompBorrowed;
-            }
-
-            // total lending balances in asset token
-            assetBalanceTotalLending = convertUSDToToken(
-                usdBalanceTotalLending,
-                asset
-            );
-
-            // total assets in asset token
-            _totalAssets = idleAssets + assetBalanceTotalLending;
-
             // deploy idle, also rebalances
             _deployFunds(idleAssets);
         }
+
+        // we have supply & borrow in AAVE and supply in Compound
+        uint256 usdBalanceCompSupplied = _compSuppliedFundsInUSD();
+        uint256 usdBalanceCompBorrowed = _compBorrowedFundsInUSD();
+        (
+            uint256 usdBalanceAaveSupplied,
+            uint256 usdBalanceAaveBorrowed
+        ) = _aaveSupplyBorrowBalancesInUSD();
+
+        // all supply is + and all borrow is -
+        uint256 lending = usdBalanceCompSupplied +
+            usdBalanceAaveSupplied -
+            usdBalanceCompBorrowed -
+            usdBalanceAaveBorrowed;
+
+        // convert lending balance in asset token
+        lending = convertUSDToToken(lending, asset);
+
+        // total assets in asset token
+        _totalAssets = lending + ERC20(asset).balanceOf(address(this));
     }
 
     function _sellRewards() internal {}
@@ -945,7 +918,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
         uint256 tokenDecimals = IERC20Metadata(_token).decimals();
 
-        return (_amount * AAVE_PRICE_ORACLE_BASE) / tokenPrice / 10 ** (18 - tokenDecimals);
+        return
+            (_amount * AAVE_PRICE_ORACLE_BASE) /
+            tokenPrice /
+            10 ** (18 - tokenDecimals);
     }
 
     /// @dev _amount is always in tokens native decimals
@@ -957,6 +933,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
         uint256 tokenDecimals = IERC20Metadata(_token).decimals();
 
-        return (_amount * 10 ** (18 - tokenDecimals) * tokenPrice) / AAVE_PRICE_ORACLE_BASE;
+        return
+            (_amount * 10 ** (18 - tokenDecimals) * tokenPrice) /
+            AAVE_PRICE_ORACLE_BASE;
     }
 }
