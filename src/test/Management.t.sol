@@ -44,4 +44,36 @@ contract ManagementTest is Setup {
         strategy.setLtvTarget(11);
         assertEq(strategy.ltvTarget(), 11);
     }
+
+    function test_setLowerLtv() public {
+        uint256 lowerLtv = strategy.ltvTarget() - 1;
+        vm.prank(user);
+        vm.expectRevert("!Authorized");
+        strategy.setLowerLtv(lowerLtv);
+
+        // management can setLtvTarget
+        vm.prank(management);
+        vm.expectRevert("!lowerLtv");
+        strategy.setLowerLtv(lowerLtv + 5);
+
+        vm.prank(management);
+        strategy.setLowerLtv(lowerLtv);
+        assertEq(strategy.lowerLtv(), lowerLtv);
+    }
+
+    function test_setUpperLtv() public {
+        uint256 upperLtv = strategy.ltvTarget() + 1;
+        vm.prank(user);
+        vm.expectRevert("!Authorized");
+        strategy.setUpperLtv(upperLtv);
+
+        // management can setLtvTarget
+        vm.prank(management);
+        vm.expectRevert("!upperLtv");
+        strategy.setUpperLtv(upperLtv - 5);
+
+        vm.prank(management);
+        strategy.setUpperLtv(upperLtv);
+        assertEq(strategy.upperLtv(), upperLtv);
+    }
 }

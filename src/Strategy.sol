@@ -124,6 +124,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
         borrowAsset = _borrowAsset;
         ltvTarget = 50_00; // 50%
+        lowerLtv = 40_00; // 40%
+        upperLtv = 60_00; // 60%
 
         // Make approve the lending pool for cheaper deposits.
         ERC20(_asset).safeApprove(address(aaveLendingPool), type(uint256).max);
@@ -135,6 +137,12 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         minAmountToSell = 1e17; // COMP ~ $57
         base = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619; // WETH
         router = 0xE592427A0AEce92De3Edee1F18E0157C05861564; // UNI V3 Router
+
+        require(
+            IERC20Metadata(_borrowAsset).decimals() < 19,
+            "_borrowAsset.decimals>18"
+        );
+        require(IERC20Metadata(_asset).decimals() < 19, "_asset.decimals>18");
     }
 
     /**
@@ -188,6 +196,20 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         ltvTarget = _ltvTarget;
     }
 
+    /// @notice set lower bound for rebalance
+    /// @param _lowerLtv lower bound for rebalance in BPS
+    function setLowerLtv(uint256 _lowerLtv) external onlyManagement {
+        require(_lowerLtv < ltvTarget, "!lowerLtv");
+        lowerLtv = _lowerLtv;
+    }
+
+    /// @notice set upper bound for rebalance
+    /// @param _upperLtv upper bound for rebalance in BPS
+    function setUpperLtv(uint256 _upperLtv) external onlyManagement {
+        require(_upperLtv > ltvTarget, "!upperLtv");
+        upperLtv = _upperLtv;
+    }
+
     /*//////////////////////////////////////////////////////////////
                 NEEDED TO BE OVERRIDEN BY STRATEGIST
     //////////////////////////////////////////////////////////////*/
@@ -205,86 +227,98 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      */
     function _deployFunds(uint256 _amount) internal override {
         // Supply aave, borrow USDC aave, supply USDC Compound
+
+        // supply regardless, we always supply
+        // borrow or repay if needed
         if (mode == 0) {
-            // supply regardless, we always supply
-            // borrow or repay if needed
             _aaveSupply(_amount);
-
-            // @SPALEN is this in USD terms with 18 decimals ? I am assuming it is
-            (uint256 supply, uint256 borrow) = _aaveSupplyBorrowBalances();
-
-            // current ltv, including our supply
-            uint256 currentLTV = _getLTV(supply, borrow);
-
-            // desired borrows given target ltv
-            uint256 desiredBorrows = _getBorrowFromSupply(supply, ltvTarget);
-
-            // we need to deleverage, a.k.a repay
-            if (currentLTV > upperLtv) {
-                // withdraw up to desired so we can repay
-                uint256 toWithdraw = borrow - desiredBorrows;
-
-                // NOTE: DECIMAL ISSUES!
-                // I wanted to keep all the accounting in 18 decimals with USD nominated
-                // when we actually do supply-borrow-repay we use the original denominations
-                // NOTE: fuck everything that doesnt have 18 decimals
-
-                // withdraw from compound
-                _compWithdraw(toWithdraw, borrowAsset); // Decimal problem
-
-                // repay aave
-                _aaveRepay(toWithdraw); // Decimal problem
-            }
-
-            // we need to leverage, a.k.a borrow
-            if (currentLTV < lowerLtv) {
-                // borrow up to desired so we can leverage
-                uint256 toBorrow = desiredBorrows - borrow;
-
-                // borrow aave
-                _aaveBorrow(toBorrow); // Decimal problem
-
-                // supply compound
-                _compSupply(toBorrow, borrowAsset); // Decimal problem
-            }
-        }
-        // Supply compound, borrow USDC compound, supply USDC aave
-        else {
-            // supply always
+            _rebalanceMode0();
+        } else {
             _compSupply(_amount, asset);
+            _rebalanceMode1();
+        }
+    }
 
-            uint256 supply = _compCollateralBalance(asset);
-            uint256 borrow = _compBorrowedFunds();
+    function _rebalanceMode0() internal {
+        // both 18 decimals
+        (uint256 supply, uint256 borrow) = _aaveSupplyBorrowBalancesInUSD();
 
-            // current ltv, including our supply
-            uint256 currentLTV = _getLTV(supply, borrow);
+        // current ltv, including our supply
+        uint256 currentLTV = _getLTV(supply, borrow);
 
-            // desired borrows given target ltv
-            uint256 desiredBorrows = _getBorrowFromSupply(supply, ltvTarget);
+        // desired borrows given target ltv
+        uint256 desiredBorrows = _getBorrowFromSupply(supply, ltvTarget);
 
-            // we need to deleverage, a.k.a repay
-            if (currentLTV > upperLtv) {
-                // withdraw up to desired so we can repay
-                uint256 toWithdraw = borrow - desiredBorrows;
+        // we need to deleverage, a.k.a repay
+        if (currentLTV > upperLtv) {
+            // withdraw up to desired so we can repay
+            uint256 toWithdraw = borrow - desiredBorrows; // this is USD terms with 18 decimals
 
-                // withdraw from aave
-                _aaveWithdraw(toWithdraw);
+            // in terms of USDC, 6 decimals
+            toWithdraw = convertUSDToToken(toWithdraw, borrowAsset);
 
-                // repay comp
-                _compSupply(toWithdraw, borrowAsset);
-            }
+            // withdraw from compound
+            _compWithdraw(toWithdraw, borrowAsset);
 
-            // we need to leverage, a.k.a borrow
-            if (currentLTV < lowerLtv) {
-                // borrow up to desired so we can leverage
-                uint256 toBorrow = desiredBorrows - borrow;
+            // repay aave
+            _aaveRepay(toWithdraw);
+        }
 
-                // borrow compound
-                _compWithdraw(toBorrow, borrowAsset);
+        // we need to leverage, a.k.a borrow
+        if (currentLTV < lowerLtv) {
+            // borrow up to desired so we can leverage
+            uint256 toBorrow = desiredBorrows - borrow;
 
-                // supply aave
-                _aaveSupply(toBorrow);
-            }
+            // in terms of USDC, 6 decimals
+            toBorrow = convertUSDToToken(toBorrow, borrowAsset);
+
+            // borrow aave
+            _aaveBorrow(toBorrow);
+
+            // supply compound
+            _compSupply(toBorrow, borrowAsset);
+        }
+    }
+
+    function _rebalanceMode1() internal {
+        // both 18 decimals, in terms of USD
+        uint256 supply = _compCollateralBalanceInUSD(asset);
+        uint256 borrow = _compBorrowedFundsInUSD();
+
+        // current ltv, including our supply
+        uint256 currentLTV = _getLTV(supply, borrow);
+
+        // desired borrows given target ltv
+        uint256 desiredBorrows = _getBorrowFromSupply(supply, ltvTarget);
+
+        // we need to deleverage, a.k.a repay
+        if (currentLTV > upperLtv) {
+            // withdraw up to desired so we can repay
+            uint256 toWithdraw = borrow - desiredBorrows;
+
+            // 6 decimals
+            toWithdraw = convertUSDToToken(toWithdraw, borrowAsset);
+
+            // withdraw from aave
+            _aaveWithdraw(toWithdraw);
+
+            // repay comp
+            _compSupply(toWithdraw, borrowAsset);
+        }
+
+        // we need to leverage, a.k.a borrow
+        if (currentLTV < lowerLtv) {
+            // borrow up to desired so we can leverage
+            uint256 toBorrow = desiredBorrows - borrow;
+
+            // 6 decimals
+            toBorrow = convertUSDToToken(toBorrow, borrowAsset);
+
+            // borrow compound
+            _compWithdraw(toBorrow, borrowAsset);
+
+            // supply aave
+            _aaveSupply(toBorrow);
         }
     }
 
@@ -337,22 +371,16 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        // scale down amount to max available
-        _amount = Math.min(aToken.balanceOf(address(this)), _amount);
+        _amount = _convertAssetToBorrow(_amount);
 
-        // borrowing is the same for ltv as withdrawing
-        uint256 newLtv = _aaveNewLtvBorrow(_amount);
-        if (newLtv > ltvTarget) {
-            _flowAaveCompRepay(_amount);
+        // 0 --> supply/borrow AAVE, supply Compound
+        if (mode == 0) {
+            _compWithdraw(_amount, borrowAsset); // I am assuming we will have amountInUSDC in USDC idle
+            _rebalanceMode0();
+        } else {
+            _aaveWithdraw(_amount); // I am assuming we will have amountInUSDC in USDC idle
+            _rebalanceMode1();
         }
-
-        uint256 withdrawn = aaveLendingPool.withdraw(
-            asset,
-            _amount,
-            address(this)
-        );
-        // verify we didn't lose funds in aave
-        require(withdrawn >= _amount, "!freeFunds");
     }
 
     /**
@@ -383,28 +411,34 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         returns (uint256 _totalAssets)
     {
         if (!TokenizedStrategy.isShutdown()) {
-            // Claim and sell any rewards to `asset`.
-            // _claimAndSellRewards();
-
-            // deposit any loose funds
-            uint256 looseAsset = ERC20(asset).balanceOf(address(this));
-            if (looseAsset > 0) {
-                aaveLendingPool.supply(
-                    asset,
-                    looseAsset,
-                    address(this),
-                    REF_CODE
-                );
-                looseAsset = (looseAsset * ltvTarget) / MAX_BPS;
-                if (_aaveNewLtvBorrow(looseAsset) < ltvTarget) {
-                    _flowAaveBorrowCompSupply(looseAsset);
-                }
-            }
+            _sellRewards();
+            uint256 idleAssets = ERC20(asset).balanceOf(address(this));
+            // deploy idle, also rebalances
+            _deployFunds(idleAssets);
         }
 
-        // @todo check this logic
-        _totalAssets = aaveFunds() + compFunds();
+        // we have supply & borrow in AAVE and supply in Compound
+        uint256 usdBalanceCompSupplied = _compSuppliedFundsInUSD();
+        uint256 usdBalanceCompBorrowed = _compBorrowedFundsInUSD();
+        (
+            uint256 usdBalanceAaveSupplied,
+            uint256 usdBalanceAaveBorrowed
+        ) = _aaveSupplyBorrowBalancesInUSD();
+
+        // all supply is + and all borrow is -
+        uint256 lending = usdBalanceCompSupplied +
+            usdBalanceAaveSupplied -
+            usdBalanceCompBorrowed -
+            usdBalanceAaveBorrowed;
+
+        // convert lending balance in asset token
+        lending = convertUSDToToken(lending, asset);
+
+        // total assets in asset token
+        _totalAssets = lending + ERC20(asset).balanceOf(address(this));
     }
+
+    function _sellRewards() internal {}
 
     // @todo implement
     // function _claimAndSellRewards() internal {
@@ -681,7 +715,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             ((collateral - debt) * 10 ** TokenizedStrategy.decimals()) / price;
     }
 
-    function _aaveSupplyBorrowBalances()
+    /// @dev 18 decimals in terms of USD
+    function _aaveSupplyBorrowBalancesInUSD()
         internal
         view
         returns (uint256 supply, uint256 borrow)
@@ -689,6 +724,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         (supply, borrow, , , , ) = aaveLendingPool.getUserAccountData(
             address(this)
         );
+
+        // 1e18 = AAVE_PRICE_ORACLE_BASE(1e8) * 1e10
+        supply = supply * 1e10;
+        borrow = borrow * 1e10;
     }
 
     // --- COMPOUND HELPERS --- //
@@ -714,38 +753,29 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     /// @dev USDC supplied to compound
     /// @return funds in asset value (USD)
-    function _compSuppliedFunds() internal view returns (uint256) {
+    function _compSuppliedFundsInUSD() internal view returns (uint256) {
         uint256 suppliedBalance = comet.balanceOf(address(this)); // 6 decimals, in terms of usdc
-        uint256 usdcPrice = _compPrice(borrowAsset); // 8 decimals
-        return suppliedBalance * usdcPrice * 1e4; // 18 decimals
+        return convertTokenToUSD(suppliedBalance, borrowAsset); // 18 decimals, in terms of USD
     }
 
     /// @dev USDC borrowed from compound
     /// @return funds in asset value (USD)
-    function _compBorrowedFunds() internal view returns (uint256) {
+    function _compBorrowedFundsInUSD() internal view returns (uint256) {
         uint256 borrowedBalance = comet.borrowBalanceOf(address(this)); // 6 decimals, in terms of usdc
-        uint256 usdcPrice = _compPrice(borrowAsset); // 8 decimals
-        return borrowedBalance * usdcPrice * 1e4; // 18 decimals
+        return convertTokenToUSD(borrowedBalance, borrowAsset);
     }
 
     /// @dev Collateral supplied tp compound
     /// @return funds in asset value (USD)
-    function _compCollateralBalance(
+    function _compCollateralBalanceInUSD(
         address collateral
     ) internal view returns (uint256) {
         IComet.UserCollateral memory c = comet.userCollateral(
             address(this),
             collateral
         ); // collateral decimals
-        uint256 collateralPrice = _compPrice(collateral); // 8 decimals
 
-        uint256 collatDecimals = IERC20Metadata(collateral).decimals();
-        if (collatDecimals < 10) {
-            return collateralPrice * c.balance * 10 ** (18 - collatDecimals); // 18 decimals
-        }
-
-        return
-            (collateralPrice * c.balance) / (10 ** ((8 + collatDecimals) - 18)); // 18 decimals
+        return convertTokenToUSD(c.balance, collateral);
     }
 
     /// @dev asset supplied to compound
@@ -879,5 +909,34 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         // @todo extract decimals for borrowAsset,
         // wbtc = 8 decimasl / usdc = 6 decimals -> / 1e2 to get the same amount
         return (_amount * assetPrice) / borrowPrice / 10 ** 2;
+    }
+
+    /// @dev _amount is always in 18 decimals and its denominated in USD
+    /// returns always the tokens native decimals
+    function convertUSDToToken(
+        uint256 _amount,
+        address _token
+    ) public view returns (uint256) {
+        uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
+        uint256 tokenDecimals = IERC20Metadata(_token).decimals();
+
+        return
+            (_amount * AAVE_PRICE_ORACLE_BASE) /
+            tokenPrice /
+            10 ** (18 - tokenDecimals);
+    }
+
+    /// @dev _amount is always in tokens native decimals
+    /// returns always the 18 decimaled USD value
+    function convertTokenToUSD(
+        uint256 _amount,
+        address _token
+    ) public view returns (uint256) {
+        uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
+        uint256 tokenDecimals = IERC20Metadata(_token).decimals();
+
+        return
+            (_amount * 10 ** (18 - tokenDecimals) * tokenPrice) /
+            AAVE_PRICE_ORACLE_BASE;
     }
 }
