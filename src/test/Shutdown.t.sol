@@ -15,7 +15,7 @@ contract ShutdownTest is Setup {
         mintAndDepositIntoStrategy(strategy, user, _amount);
 
         // TODO: Implement logic so totalDebt is _amount and totalIdle = 0.
-        checkStrategyTotals(strategy, _amount, 0, _amount);
+        checkStrategyTotals(strategy, _amount, _amount, 0);
 
         // Earn Interest
         skip(1 days);
@@ -25,7 +25,7 @@ contract ShutdownTest is Setup {
         strategy.shutdownStrategy();
 
         // TODO: Implement logic so totalDebt is _amount and totalIdle = 0.
-        checkStrategyTotals(strategy, _amount, 0, _amount);
+        checkStrategyTotals(strategy, _amount, _amount, 0);
 
         // Make sure we can still withdraw the full amount
         uint256 balanceBefore = asset.balanceOf(user);
