@@ -42,4 +42,7 @@ interface IStrategyInterface is IStrategy, IUniswapV3Swapper {
         uint256 _amount,
         address _token
     ) external view returns (uint256);
+
+    // @todo remove after testing
+    function _claimAndSellRewards() external returns (uint256);
 }

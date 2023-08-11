@@ -189,4 +189,16 @@ contract OperationTest is Setup {
 
         assertTrue(!strategy.tendTrigger());
     }
+
+    // @todo remove after testing
+    function test_sellRewards() public {
+        uint256 amount = 1e18;
+        deal(
+            0x8505b9d2254A7Ae468c0E9dd10Ccea3A837aef5c,
+            address(strategy),
+            amount
+        );
+        uint256 swapped = strategy._claimAndSellRewards();
+        assertGt(swapped, 1e5, "!swapped");
+    }
 }

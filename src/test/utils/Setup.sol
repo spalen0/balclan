@@ -99,6 +99,9 @@ contract Setup is ExtendedTest, IEvents {
         vm.prank(management);
         _strategy.acceptManagement();
 
+        vm.prank(management);
+        _strategy.setMinAmountToSell(1e10);
+
         // @note only for testing without compound supply
         deal(borrowAsset, address(_strategy), 1e6);
 
