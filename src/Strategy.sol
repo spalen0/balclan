@@ -267,7 +267,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             // in terms of USDC, 6 decimals
             toWithdraw = convertUSDToToken(toWithdraw, borrowAsset);
 
-            // already accrued
             // withdraw from compound
             _compWithdraw(toWithdraw, borrowAsset);
 
@@ -390,7 +389,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             // we can withdraw from compound up to whatever we have supplied
             // amountInUSDC = Math.min(_compSuppliedFundsInUSDC(), amountInUSDC);
 
-            comet.accrueAccount(address(this));
             // withdraw the necessary or all the USDC from Compound
             _compWithdraw(amountInUSDC, borrowAsset);
 
@@ -424,7 +422,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             // if strategy is healthy we should end up 0 debt in the compound here
             _compSupply(amountInUSDC, borrowAsset);
 
-            // accrued in supply
             // we should revert if we cannot withdraw sepcified amount
             // withdraw the requested amount from the compound
             _compWithdraw(_amount, asset);
@@ -461,9 +458,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         override
         returns (uint256 _totalAssets)
     {
-        // accrue interest and rewards
-        comet.accrueAccount(address(this));
-
         if (!TokenizedStrategy.isShutdown()) {
             _claimAndSellRewards();
             uint256 idleAssets = ERC20(asset).balanceOf(address(this));
@@ -495,8 +489,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     // @todo set to internal and remove return value
     function _claimAndSellRewards() public returns (uint256) {
-        // rewards accrued
-        cometRewards.claim(address(comet), address(this), false);
+        cometRewards.claim(address(comet), address(this), true);
         address comp = cometRewards.rewardConfig(address(comet)).token;
         uint256 balance = ERC20(comp).balanceOf(address(this));
         return _swapFrom(comp, asset, balance, 0);
@@ -623,8 +616,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount The amount of asset to attempt to free.
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
-        // accrue interest
-        comet.accrueAccount(address(this));
         // @todo add modes
         _compWithdraw(type(uint256).max, borrowAsset);
         _aaveRepay(type(uint256).max);
