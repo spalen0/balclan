@@ -616,22 +616,38 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount The amount of asset to attempt to free.
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
-        // @todo add modes
-        _compWithdraw(type(uint256).max, borrowAsset);
-        _aaveRepay(type(uint256).max);
+        if (mode == 0) {
+            // @todo scale to max comp liquidity
+            _compWithdraw(type(uint256).max, borrowAsset);
+            _aaveRepay(type(uint256).max);
 
-        uint256 aaveMax = Math.min(
-            ERC20(asset).balanceOf(address(aToken)),
-            aToken.balanceOf(address(this))
-        );
+            uint256 aaveMax = Math.min(
+                ERC20(asset).balanceOf(address(aToken)),
+                aToken.balanceOf(address(this))
+            );
 
-        // withdraw as much as possible from aave
-        // slither-disable-next-line unused-return
-        aaveLendingPool.withdraw(
-            asset,
-            Math.min(_amount, aaveMax),
-            address(this)
-        );
+            // withdraw as much as possible from aave
+            // slither-disable-next-line unused-return
+            aaveLendingPool.withdraw(
+                asset,
+                Math.min(_amount, aaveMax),
+                address(this)
+            );
+        } else {
+            uint256 aaveMax = Math.min(
+                ERC20(borrowAsset).balanceOf(address(borrowAToken)),
+                borrowAToken.balanceOf(address(this))
+            );
+            _aaveWithdraw(aaveMax, borrowAsset);
+
+            _compSupply(
+                ERC20(borrowAsset).balanceOf(address(this)),
+                borrowAsset
+            );
+
+            // @todo scale down to max comp liquidity
+            _compWithdraw(type(uint256).max, asset);
+        }
     }
 
     // --- AAVE HELPERS --- //
@@ -641,10 +657,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     function _aaveRepay(uint256 _amount) private {
         // @todo maybe remove param and just use all free balance
         // _amount = borrowDebtToken.balanceOf(address(this));
-        // @todo we should not get in situtaion to repay 0
-        // if (_amount != 0) {
         aaveLendingPool.repay(borrowAsset, _amount, RATE_MODE, address(this));
-        // }
     }
 
     function _aaveSupply(uint256 _amount, address _asset) private {
