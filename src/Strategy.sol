@@ -27,6 +27,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     address public immutable borrowAsset;
     IAToken public immutable borrowAToken;
     IAToken public immutable aToken;
+    // IERC20Metadata public constant borrowDebtToken =
+    //     IERC20Metadata(0xFCCf3cAbbe80101232d343252614b6A3eE81C989); // for test
     IPool public immutable aaveLendingPool;
     IPriceOracleGetter public immutable aavePriceOracle;
     IProtocolDataProvider public immutable aaveProtocolDataProvider;
@@ -58,7 +60,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     uint256 public lowerLtv;
     uint256 public upperLtv;
 
-    uint256 public mode; // 0 --> supply/borrow AAVE, supply Compound, 1 --> supply/borrow Compound, supply AAVE
+    uint256 public supplyDust = 1e3;
+
+    uint256 public mode = 0; // 0 --> supply/borrow AAVE, supply Compound, 1 --> supply/borrow Compound, supply AAVE
 
     constructor(
         address _asset,
@@ -113,6 +117,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         comet = IComet(_comet);
         require(comet.baseToken() == _borrowAsset, "!baseToken");
         ERC20(_borrowAsset).safeApprove(_comet, type(uint256).max);
+        ERC20(asset).safeApprove(_comet, type(uint256).max);
         cometBaseMantissa = comet.baseScale();
         cometBaseIndexScale = comet.trackingIndexScale(); // @todo verify trackingIndexScale is used instead of baseIndexScale
         require(cometBaseMantissa > 0, "!cometBaseMantissa");
@@ -137,6 +142,9 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         minAmountToSell = 1e17; // COMP ~ $57
         base = 0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619; // WETH
         router = 0xE592427A0AEce92De3Edee1F18E0157C05861564; // UNI V3 Router
+        ERC20(compToken).safeApprove(router, type(uint256).max);
+        _setUniFees(compToken, base, 3000);
+        _setUniFees(base, asset, 500);
 
         require(
             IERC20Metadata(_borrowAsset).decimals() < 19,
@@ -231,7 +239,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         // supply regardless, we always supply
         // borrow or repay if needed
         if (mode == 0) {
-            _aaveSupply(_amount);
+            _aaveSupply(_amount, asset);
             _rebalanceMode0();
         } else {
             _compSupply(_amount, asset);
@@ -242,6 +250,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     function _rebalanceMode0() internal {
         // both 18 decimals
         (uint256 supply, uint256 borrow) = _aaveSupplyBorrowBalancesInUSD();
+
+        if (supply < supplyDust) return;
 
         // current ltv, including our supply
         uint256 currentLTV = _getLTV(supply, borrow);
@@ -300,7 +310,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             toWithdraw = convertUSDToToken(toWithdraw, borrowAsset);
 
             // withdraw from aave
-            _aaveWithdraw(toWithdraw);
+            _aaveWithdraw(toWithdraw, borrowAsset);
 
             // repay comp
             _compSupply(toWithdraw, borrowAsset);
@@ -318,7 +328,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             _compWithdraw(toBorrow, borrowAsset);
 
             // supply aave
-            _aaveSupply(toBorrow);
+            _aaveSupply(toBorrow, borrowAsset);
         }
     }
 
@@ -371,14 +381,52 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount, The amount of 'asset' to be freed.
      */
     function _freeFunds(uint256 _amount) internal override {
-        _amount = _convertAssetToBorrow(_amount);
+        uint256 amountInUSDC = _convertAssetToBorrow(_amount);
 
         // 0 --> supply/borrow AAVE, supply Compound
         if (mode == 0) {
-            _compWithdraw(_amount, borrowAsset); // I am assuming we will have amountInUSDC in USDC idle
+            // we should revert if we cannot withdraw sepcified amount
+            // we can withdraw from compound up to whatever we have supplied
+            // amountInUSDC = Math.min(_compSuppliedFundsInUSDC(), amountInUSDC);
+
+            // withdraw the necessary or all the USDC from Compound
+            _compWithdraw(amountInUSDC, borrowAsset);
+
+            // repay the necessary or all the USDC from Compound
+            // if strategy is healthy we should end up 0 debt in the AAVE here
+            // _aaveRepay(
+            //     Math.min(amountInUSDC, borrowDebtToken.balanceOf(address(this)))
+            // );
+            _aaveRepay(amountInUSDC);
+
+            // withdraw the requested amount from the aave
+            // we should revert if we cannot withdraw sepcified amount
+            _aaveWithdraw(_amount, asset);
+
+            // rebalance if needed
             _rebalanceMode0();
+
+            // 1 --> supply/borrow Compound, supply AAVE
         } else {
-            _aaveWithdraw(_amount); // I am assuming we will have amountInUSDC in USDC idle
+            // we should revert if we cannot withdraw sepcified amount
+            // we can withdraw from aave up to whatever we have supplied
+            // amountInUSDC = Math.min(
+            //     borrowAToken.balanceOf(address(this)),
+            //     amountInUSDC
+            // );
+
+            // withdraw the necessary or all the USDC from aave
+            _aaveWithdraw(amountInUSDC, borrowAsset);
+
+            // repay the necessary or all the USDC from aave
+            // if strategy is healthy we should end up 0 debt in the compound here
+            _compSupply(amountInUSDC, borrowAsset);
+
+            // we should revert if we cannot withdraw sepcified amount
+            // withdraw the requested amount from the compound
+            _compWithdraw(_amount, asset);
+
+            // rebalance if needed
             _rebalanceMode1();
         }
     }
@@ -411,10 +459,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         returns (uint256 _totalAssets)
     {
         if (!TokenizedStrategy.isShutdown()) {
-            _sellRewards();
+            _claimAndSellRewards();
             uint256 idleAssets = ERC20(asset).balanceOf(address(this));
             // deploy idle, also rebalances
-            _deployFunds(idleAssets);
+            if (idleAssets != 0) _deployFunds(idleAssets);
         }
 
         // we have supply & borrow in AAVE and supply in Compound
@@ -426,25 +474,26 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         ) = _aaveSupplyBorrowBalancesInUSD();
 
         // all supply is + and all borrow is -
-        uint256 lending = usdBalanceCompSupplied +
+        _totalAssets =
+            usdBalanceCompSupplied +
             usdBalanceAaveSupplied -
             usdBalanceCompBorrowed -
             usdBalanceAaveBorrowed;
 
         // convert lending balance in asset token
-        lending = convertUSDToToken(lending, asset);
+        _totalAssets = convertUSDToToken(_totalAssets, asset);
 
         // total assets in asset token
-        _totalAssets = lending + ERC20(asset).balanceOf(address(this));
+        _totalAssets = _totalAssets + ERC20(asset).balanceOf(address(this));
     }
 
-    function _sellRewards() internal {}
-
-    // @todo implement
-    // function _claimAndSellRewards() internal {
-    //claim all rewards
-    // _swapFrom(token, asset, balance, 0);
-    // }
+    // @todo set to internal and remove return value
+    function _claimAndSellRewards() public returns (uint256) {
+        cometRewards.claim(address(comet), address(this), true);
+        address comp = cometRewards.rewardConfig(address(comet)).token;
+        uint256 balance = ERC20(comp).balanceOf(address(this));
+        return _swapFrom(comp, asset, balance, 0);
+    }
 
     /*//////////////////////////////////////////////////////////////
                     OPTIONAL TO OVERRIDE BY STRATEGIST
@@ -495,7 +544,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             _totalIdle = debt;
         }
         // repay debt
-        _flowAaveCompRepay(_totalIdle);
+        // _flowAaveCompRepay(_totalIdle);
     }
 
     /**
@@ -539,9 +588,10 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     function availableWithdrawLimit(
         address /*_owner*/
     ) public view override returns (uint256) {
-        return
-            TokenizedStrategy.totalIdle() +
-            ERC20(asset).balanceOf(address(aToken));
+        // return
+        // 	TokenizedStrategy.totalIdle() + ERC20(asset).balanceOf(address(aToken));
+
+        return type(uint256).max;
     }
 
     /**
@@ -566,22 +616,38 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
      * @param _amount The amount of asset to attempt to free.
      */
     function _emergencyWithdraw(uint256 _amount) internal override {
-        // @todo add modes
-        _compWithdraw(type(uint256).max, borrowAsset);
-        _aaveRepay(type(uint256).max);
+        if (mode == 0) {
+            // @todo scale to max comp liquidity
+            _compWithdraw(type(uint256).max, borrowAsset);
+            _aaveRepay(type(uint256).max);
 
-        uint256 aaveMax = Math.min(
-            ERC20(asset).balanceOf(address(aToken)),
-            aToken.balanceOf(address(this))
-        );
+            uint256 aaveMax = Math.min(
+                ERC20(asset).balanceOf(address(aToken)),
+                aToken.balanceOf(address(this))
+            );
 
-        // withdraw as much as possible from aave
-        // slither-disable-next-line unused-return
-        aaveLendingPool.withdraw(
-            asset,
-            Math.min(_amount, aaveMax),
-            address(this)
-        );
+            // withdraw as much as possible from aave
+            // slither-disable-next-line unused-return
+            aaveLendingPool.withdraw(
+                asset,
+                Math.min(_amount, aaveMax),
+                address(this)
+            );
+        } else {
+            uint256 aaveMax = Math.min(
+                ERC20(borrowAsset).balanceOf(address(borrowAToken)),
+                borrowAToken.balanceOf(address(this))
+            );
+            _aaveWithdraw(aaveMax, borrowAsset);
+
+            _compSupply(
+                ERC20(borrowAsset).balanceOf(address(this)),
+                borrowAsset
+            );
+
+            // @todo scale down to max comp liquidity
+            _compWithdraw(type(uint256).max, asset);
+        }
     }
 
     // --- AAVE HELPERS --- //
@@ -589,27 +655,17 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
     /// @dev repay debt to aave in borrowAsset must be reaculated
     /// @param _amount amount to repay in borrowAsset
     function _aaveRepay(uint256 _amount) private {
-        (, uint256 debt, , , , ) = aaveLendingPool.getUserAccountData(
-            address(this)
-        );
-        // aave reverts if you try to repay 0 debt
-        if (debt > 0) {
-            // @todo IMPORTANT: fix the problem with paying for borrowing rate
-            aaveLendingPool.repay(
-                borrowAsset,
-                _amount,
-                RATE_MODE,
-                address(this)
-            );
-        }
+        // @todo maybe remove param and just use all free balance
+        // _amount = borrowDebtToken.balanceOf(address(this));
+        aaveLendingPool.repay(borrowAsset, _amount, RATE_MODE, address(this));
     }
 
-    function _aaveSupply(uint256 amount) private {
-        aaveLendingPool.supply(asset, amount, address(this), REF_CODE);
+    function _aaveSupply(uint256 _amount, address _asset) private {
+        aaveLendingPool.supply(_asset, _amount, address(this), REF_CODE);
     }
 
-    function _aaveWithdraw(uint256 amount) private {
-        aaveLendingPool.withdraw(asset, amount, address(this));
+    function _aaveWithdraw(uint256 amount, address token) private {
+        aaveLendingPool.withdraw(token, amount, address(this));
     }
 
     function _aaveBorrow(uint256 amount) private {
@@ -746,7 +802,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 _amount,
         address token
     ) internal returns (uint256) {
-        _amount = Math.min(_amount, comet.balanceOf(address(this)));
+        // _amount = Math.min(_amount, comet.balanceOf(address(this)));
         comet.withdraw(token, _amount);
         return _amount;
     }
@@ -780,9 +836,8 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
     /// @dev asset supplied to compound
     /// @return funds in asset value
-    function compFunds() public view returns (uint256) {
-        uint256 borrowBalance = comet.balanceOf(address(this));
-        return _convertBorrowToAsset(borrowBalance);
+    function _compSuppliedFundsInUSDC() public view returns (uint256) {
+        return comet.balanceOf(address(this));
     }
 
     /// @dev caluclate supply rate for borrowAsset for given amount
@@ -809,8 +864,13 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             supply;
         uint256 borrowRate = comet.getBorrowRate(utiliaztion) *
             SECONDS_PER_YEAR;
+        uint256 rewardsRate = _compRewardForBorrowBase(_amount);
 
-        return borrowRate + _compRewardForBorrowBase(_amount);
+        if (borrowRate > rewardsRate) {
+            // remove base reward because rewards are paying for borrow
+            return borrowRate - rewardsRate;
+        }
+        // we are earning from borrowing
     }
 
     function _compRewardForSupplyBase(
@@ -858,33 +918,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         return comet.getPrice(singleAssetPriceFeed);
     }
 
-    // --- FLOW HELPERS --- //
-    // AaveComp means supply to aave, borrow from aave, supply to compound
-    // CompAave means supply to compound, borrow from compound, supply to aave
-
-    /// @dev borrow borrowAsset from aave and supply it to compound
-    /// @param _amount amount to borrow in asset value
-    function _flowAaveBorrowCompSupply(uint256 _amount) internal {
-        // _amount = _convertAssetToBorrow(_amount);
-        // aaveLendingPool.borrow(
-        // 	borrowAsset,
-        // 	_amount,
-        // 	RATE_MODE,
-        // 	REF_CODE,
-        // 	address(this)
-        // );
-        // _compSupply(_amount);
-    }
-
-    /// @dev withdraw borrowAsset from compound and repay it to aave
-    /// @param _amount amount to withdraw in asset value
-    function _flowAaveCompRepay(uint256 _amount) internal returns (uint256) {
-        // _amount = _convertAssetToBorrow(_amount);
-        // _amount = _compWithdraw(_amount);
-        // _aaveRepay(_amount);
-        // return _amount;
-    }
-
     /// @dev convert borrowAsset to asset, use aave oracle to get price
     /// both comp and aave use chainlink oracle as main oracle
     /// @param _amount amount of borrowAsset to convert to asset
@@ -917,6 +950,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 _amount,
         address _token
     ) public view returns (uint256) {
+        if (_amount == 0) return 0;
         uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
         uint256 tokenDecimals = IERC20Metadata(_token).decimals();
 
@@ -932,6 +966,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         uint256 _amount,
         address _token
     ) public view returns (uint256) {
+        if (_amount == 0) return 0;
         uint256 tokenPrice = aavePriceOracle.getAssetPrice(_token); // price in 8 decimals always
         uint256 tokenDecimals = IERC20Metadata(_token).decimals();
 
