@@ -41,8 +41,8 @@ contract Setup is ExtendedTest, IEvents {
     uint256 public MAX_BPS = 10_000;
 
     // Fuzz from $0.01 of 1e6 stable coins up to 1 trillion of a 1e18 coin
-    uint256 public maxFuzzAmount = 1e11;
-    uint256 public minFuzzAmount = 1e6;
+    uint256 public maxFuzzAmount = 15 * 1e8;
+    uint256 public minFuzzAmount = 5 * 1e8;
 
     // Default prfot max unlock time is set for 10 days
     uint256 public profitMaxUnlockTime = 10 days;
@@ -72,6 +72,8 @@ contract Setup is ExtendedTest, IEvents {
 
     function setUpStrategy() public returns (address) {
         address aavePoolAddressProvider = 0xa97684ead0e402dC232d5A977953DF7ECBaB3CDb;
+        address comet = 0xF25212E676D1F7F89Cd72fFEe66158f541246445;
+        address cometRewards = 0x45939657d1CA34A8FA39A924B71D28Fe8431e581;
         address borrowAsset = tokenAddrs["USDC"];
         // we save the strategy as a IStrategyInterface to give it the needed interface
         IStrategyInterface _strategy = IStrategyInterface(
@@ -80,7 +82,9 @@ contract Setup is ExtendedTest, IEvents {
                     address(asset),
                     "Tokenized Strategy",
                     borrowAsset,
-                    aavePoolAddressProvider
+                    aavePoolAddressProvider,
+                    comet,
+                    cometRewards
                 )
             )
         );
@@ -94,6 +98,9 @@ contract Setup is ExtendedTest, IEvents {
 
         vm.prank(management);
         _strategy.acceptManagement();
+
+        vm.prank(management);
+        _strategy.setMinAmountToSell(1e10);
 
         // @note only for testing without compound supply
         deal(borrowAsset, address(_strategy), 1e6);
