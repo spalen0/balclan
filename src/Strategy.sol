@@ -387,7 +387,7 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
         if (mode == 0) {
             // we should revert if we cannot withdraw sepcified amount
             // we can withdraw from compound up to whatever we have supplied
-            // amountInUSDC = Math.min(_compSuppliedFundsInUSDC(), amountInUSDC);
+            amountInUSDC = Math.min(_compSuppliedFundsInUSDC(), amountInUSDC);
 
             // withdraw the necessary or all the USDC from Compound
             _compWithdraw(amountInUSDC, borrowAsset);
@@ -408,12 +408,11 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
 
             // 1 --> supply/borrow Compound, supply AAVE
         } else {
-            // we should revert if we cannot withdraw sepcified amount
             // we can withdraw from aave up to whatever we have supplied
-            // amountInUSDC = Math.min(
-            //     borrowAToken.balanceOf(address(this)),
-            //     amountInUSDC
-            // );
+            amountInUSDC = Math.min(
+                borrowAToken.balanceOf(address(this)),
+                amountInUSDC
+            );
 
             // withdraw the necessary or all the USDC from aave
             _aaveWithdraw(amountInUSDC, borrowAsset);
@@ -422,7 +421,6 @@ contract Strategy is BaseTokenizedStrategy, UniswapV3Swapper {
             // if strategy is healthy we should end up 0 debt in the compound here
             _compSupply(amountInUSDC, borrowAsset);
 
-            // we should revert if we cannot withdraw sepcified amount
             // withdraw the requested amount from the compound
             _compWithdraw(_amount, asset);
 
